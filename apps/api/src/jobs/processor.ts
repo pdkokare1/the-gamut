@@ -2,7 +2,8 @@ import { Job } from 'bullmq';
 import { prisma } from '@gamut/db';
 import { newsService } from '../services/news';
 import { aiService } from '../services/ai';
-import { audioService } from '../services/audio'; // New Import
+import { audioService } from '../services/audio';
+import { gatekeeperService } from '../services/gatekeeper'; // New Import
 
 export const processNewsJob = async (job: Job) => {
   console.log(`Starting Job: ${job.name}`);
@@ -16,19 +17,24 @@ export const processNewsJob = async (job: Job) => {
 
   for (const item of rawArticles) {
     try {
-      // --- A. Duplicate Check ---
+      // --- A. Gatekeeper Check (New) ---
+      // Skip if content is low quality or spam
+      if (!gatekeeperService.isValid(item.title, item.description || '', item.url)) {
+        continue;
+      }
+
+      // --- B. Duplicate Check ---
       const exists = await prisma.article.findUnique({
         where: { url: item.url }
       });
 
       if (exists) continue;
 
-      // --- B. AI Analysis ---
+      // --- C. AI Analysis ---
       const fullText = `${item.title}. ${item.description || ''} ${item.content || ''}`;
-      
       const analysis = await aiService.analyzeArticle(fullText, item.title);
       
-      // --- C. Clustering Logic ---
+      // --- D. Clustering Logic ---
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
       let clusterId: number | null = null;
       let clusterTopic = analysis.primaryNoun || "General";
@@ -74,7 +80,7 @@ export const processNewsJob = async (job: Job) => {
         }).catch(e => console.log("Narrative creation warning:", e.message));
       }
 
-      // --- D. Save Article ---
+      // --- E. Save Article ---
       const savedArticle = await prisma.article.create({
         data: {
           headline: item.title,
@@ -101,9 +107,7 @@ export const processNewsJob = async (job: Job) => {
         }
       });
 
-      // --- E. Audio Generation (New) ---
-      // We run this in the background for the saved article
-      // Passing the ID to update the record later with the URL
+      // --- F. Audio Generation ---
       audioService.generateForArticle(savedArticle.id, analysis.summary, savedArticle.headline)
         .then(async (audioUrl) => {
             if (audioUrl) {
@@ -111,7 +115,6 @@ export const processNewsJob = async (job: Job) => {
                     where: { id: savedArticle.id },
                     data: { audioUrl }
                 });
-                console.log(`🎧 Audio attached to article ${savedArticle.id}`);
             }
         })
         .catch(err => console.error("Audio gen background error:", err));
