@@ -68,15 +68,16 @@ model Article {
   updatedAt       DateTime @updatedAt
 
   // Relations
-  savedByProfiles Profile[] @relation(fields: [savedByProfileIds], references: [id])
-  savedByProfileIds String[] @db.ObjectId
+  savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id])
+  savedByProfileIds String[]      @db.ObjectId
 
-  activityLogs    ActivityLog[]
+  activityLogs      ActivityLog[]
 
-  // Indexes for Performance
+  // Indexes for Performance (Matching old Mongoose Compound Indexes)
   @@index([category, politicalLean, publishedAt])
   @@index([politicalLean, trustScore])
   @@index([clusterId, publishedAt])
+  @@index([country, category, publishedAt])
 }
 
 // --- 2. Profile Model (The User) ---
