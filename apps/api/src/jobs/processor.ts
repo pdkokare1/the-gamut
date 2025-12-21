@@ -2,6 +2,7 @@ import { Job } from 'bullmq';
 import { prisma } from '@gamut/db';
 import { newsService } from '../services/news';
 import { aiService } from '../services/ai';
+import { audioService } from '../services/audio'; // New Import
 
 export const processNewsJob = async (job: Job) => {
   console.log(`Starting Job: ${job.name}`);
@@ -23,38 +24,30 @@ export const processNewsJob = async (job: Job) => {
       if (exists) continue;
 
       // --- B. AI Analysis ---
-      // We combine title + desc for better context
       const fullText = `${item.title}. ${item.description || ''} ${item.content || ''}`;
       
-      // Note: Assumes aiService returns: { summary, category, politicalLean, sentiment, biasScore, trustScore, primaryNoun, ... }
       const analysis = await aiService.analyzeArticle(fullText, item.title);
       
-      // --- C. Clustering Logic (The "Smart" Part) ---
-      // Try to find a matching cluster from the last 24 hours
+      // --- C. Clustering Logic ---
       const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      
       let clusterId: number | null = null;
       let clusterTopic = analysis.primaryNoun || "General";
 
-      // Find potential matches based on Category + Noun overlap
-      // This is a simplified "in-memory" clustering to avoid heavy vector DB setup for now
       const potentialMatch = await prisma.article.findFirst({
         where: {
           publishedAt: { gte: twentyFourHoursAgo },
           category: analysis.category,
-          primaryNoun: analysis.primaryNoun, // Strict noun match
+          primaryNoun: analysis.primaryNoun,
           clusterId: { not: null }
         },
         orderBy: { publishedAt: 'desc' }
       });
 
       if (potentialMatch && potentialMatch.clusterId) {
-        // MATCH FOUND: Join existing cluster
         clusterId = potentialMatch.clusterId;
         clusterTopic = potentialMatch.clusterTopic || clusterTopic;
         updatedClusters++;
         
-        // Update the "Narrative" (The master story container)
         await prisma.narrative.update({
             where: { clusterId: clusterId },
             data: {
@@ -65,16 +58,12 @@ export const processNewsJob = async (job: Job) => {
         }).catch(e => console.log("Narrative update warning:", e.message));
 
       } else {
-        // NO MATCH: Create new Cluster
-        // Generate a random ID for the cluster (simple integer for indexing)
         clusterId = Math.floor(Math.random() * 1000000);
-        
-        // Create the initial Narrative for this new topic
         await prisma.narrative.create({
             data: {
                 clusterId: clusterId,
-                masterHeadline: item.title, // Initially matches the first article
-                executiveSummary: analysis.summary, // Initially matches the first article
+                masterHeadline: item.title,
+                executiveSummary: analysis.summary,
                 category: analysis.category,
                 country: "Global",
                 sourceCount: 1,
@@ -85,8 +74,8 @@ export const processNewsJob = async (job: Job) => {
         }).catch(e => console.log("Narrative creation warning:", e.message));
       }
 
-      // --- D. Save Article to DB ---
-      await prisma.article.create({
+      // --- D. Save Article ---
+      const savedArticle = await prisma.article.create({
         data: {
           headline: item.title,
           url: item.url,
@@ -95,7 +84,6 @@ export const processNewsJob = async (job: Job) => {
           source: item.source.name || "Unknown",
           publishedAt: new Date(item.publishedAt),
           
-          // AI Fields
           category: analysis.category,
           politicalLean: analysis.politicalLean,
           sentiment: analysis.sentiment,
@@ -103,17 +91,30 @@ export const processNewsJob = async (job: Job) => {
           trustScore: analysis.trustScore,
           keyFindings: analysis.keyFindings || [],
           
-          // Clustering Fields
           clusterId: clusterId,
           clusterTopic: clusterTopic,
           primaryNoun: analysis.primaryNoun,
           
-          // Defaults
           coverageLeft: 0,
           coverageCenter: 0,
           coverageRight: 0
         }
       });
+
+      // --- E. Audio Generation (New) ---
+      // We run this in the background for the saved article
+      // Passing the ID to update the record later with the URL
+      audioService.generateForArticle(savedArticle.id, analysis.summary, savedArticle.headline)
+        .then(async (audioUrl) => {
+            if (audioUrl) {
+                await prisma.article.update({
+                    where: { id: savedArticle.id },
+                    data: { audioUrl }
+                });
+                console.log(`🎧 Audio attached to article ${savedArticle.id}`);
+            }
+        })
+        .catch(err => console.error("Audio gen background error:", err));
 
       newCount++;
     } catch (err) {
@@ -121,6 +122,6 @@ export const processNewsJob = async (job: Job) => {
     }
   }
 
-  console.log(`Job Complete. Processed ${newCount} new articles. Updated ${updatedClusters} clusters.`);
+  console.log(`Job Complete. Processed ${newCount} new articles.`);
   return { processed: newCount, clustersUpdated: updatedClusters };
 };
