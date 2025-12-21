@@ -1,22 +1,26 @@
 import { Outlet } from "react-router-dom";
-import { Header } from "./Header";
 import { BottomNav } from "./BottomNav";
+import { Header } from "./Header"; // Assumes you have this from previous steps
+import { AudioProvider } from "../../context/AudioContext"; // New
+import { GlobalAudioPlayer } from "../GlobalAudioPlayer"; // New
 
 export function AppLayout() {
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      {/* Top Header */}
-      <Header />
+    <AudioProvider>
+      <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-24 md:pb-0">
+        <Header />
+        
+        <main className="pt-16 md:pt-20 max-w-7xl mx-auto min-h-[85vh]">
+          <Outlet />
+        </main>
+        
+        {/* Global Player sits above bottom nav on mobile */}
+        <GlobalAudioPlayer />
 
-      {/* Main Content Area */}
-      <main className="flex-1 container px-4 py-4 pb-24 md:pb-8">
-        <Outlet />
-      </main>
-
-      {/* Mobile Bottom Nav (Visible only on small screens typically, but we keep it generic for now) */}
-      <div className="md:hidden">
-        <BottomNav />
+        <div className="md:hidden">
+          <BottomNav />
+        </div>
       </div>
-    </div>
+    </AudioProvider>
   );
 }
