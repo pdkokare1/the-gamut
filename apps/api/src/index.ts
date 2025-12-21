@@ -1,39 +1,38 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import helmet from '@fastify/helmet';
 import { fastifyTRPCPlugin } from '@trpc/server/adapters/fastify';
-import { config } from './config';
+import { appRouter } from './routers/root';
 import { createContext } from './context';
-import { appRouter } from './routers/root'; // We will create this next
+import { shareRoutes } from './routes/share'; // New Import
 
 const server = Fastify({
-  logger: true, // Replaces Pino manual setup
   maxParamLength: 5000,
+  logger: true,
 });
 
 async function main() {
-  // 1. Security & CORS
   await server.register(cors, {
-    origin: '*', // Lock this down in production later
-    credentials: true,
+    origin: '*', // Configure this for production later
   });
-  await server.register(helmet);
 
-  // 2. tRPC API Layer
+  // tRPC API Endpoint
   await server.register(fastifyTRPCPlugin, {
     prefix: '/trpc',
     trpcOptions: { router: appRouter, createContext },
   });
 
-  // 3. Health Check
+  // Register Standard Routes (Social Share)
+  await server.register(shareRoutes);
+
+  // Health Check
   server.get('/health', async () => {
-    return { status: 'ok', service: 'api' };
+    return { status: 'ok', timestamp: new Date() };
   });
 
-  // 4. Start Server
   try {
-    await server.listen({ port: Number(config.port), host: '0.0.0.0' });
-    console.log(`🚀 API running on http://0.0.0.0:${config.port}`);
+    const port = parseInt(process.env.PORT || '4000');
+    await server.listen({ port, host: '0.0.0.0' });
+    console.log(`🚀 API Server running on port ${port}`);
   } catch (err) {
     server.log.error(err);
     process.exit(1);
