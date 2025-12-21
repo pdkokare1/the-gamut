@@ -1,21 +1,18 @@
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
 import { TRPCError } from '@trpc/server';
+import { gamificationService } from '../services/gamification'; // New Import
 
 export const profileRouter = router({
-  // 1. Get My Profile (Creates one if it doesn't exist)
+  // 1. Get My Profile
   getMe: protectedProcedure.query(async ({ ctx }) => {
-    const { uid, email, name } = ctx.user; // From Firebase
+    const { uid, email, name } = ctx.user;
 
-    // Try to find existing profile
     let profile = await ctx.prisma.profile.findUnique({
       where: { userId: uid },
-      include: {
-        savedArticles: true, // Fetch actual article data
-      },
+      include: { savedArticles: true },
     });
 
-    // If first login, create profile automatically
     if (!profile) {
       profile = await ctx.prisma.profile.create({
         data: {
@@ -23,30 +20,25 @@ export const profileRouter = router({
           email: email || '',
           username: name || `User_${uid.slice(0, 5)}`,
           savedArticles: { connect: [] },
-          // Default Gamification stats
           currentStreak: 1,
           lastActiveDate: new Date(),
         },
         include: { savedArticles: true },
       });
     } else {
-        // --- RESTORED LOGIC: Streak Calculation ---
+        // Streak Logic
         const lastActive = new Date(profile.lastActiveDate);
         const now = new Date();
         const diffTime = Math.abs(now.getTime() - lastActive.getTime());
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
         let newStreak = profile.currentStreak;
-        
-        // If active yesterday (diffDays approx 1) or today, keep streak. 
-        // If gap > 1 day, reset.
         if (diffDays > 2) { 
             newStreak = 1; 
         } else if (diffDays >= 1 && diffDays <= 2) {
             newStreak += 1;
         }
 
-        // Update activity timestamp if it's a new day
         if (diffDays >= 1) {
             profile = await ctx.prisma.profile.update({
                 where: { id: profile.id },
@@ -59,7 +51,15 @@ export const profileRouter = router({
         }
     }
 
-    return profile;
+    // --- NEW: Check for Badges on Load ---
+    // This ensures if they hit a milestone (like a streak), they see it immediately
+    await gamificationService.checkAndAwardBadges(uid);
+    
+    // Re-fetch to get latest badges
+    return ctx.prisma.profile.findUnique({
+        where: { userId: uid },
+        include: { savedArticles: true }
+    });
   }),
 
   // 2. Toggle Saved Article
@@ -77,7 +77,6 @@ export const profileRouter = router({
 
       const isSaved = profile.savedArticles.some((a) => a.id === input.articleId);
 
-      // Connect (Save) or Disconnect (Unsave)
       const updatedProfile = await ctx.prisma.profile.update({
         where: { userId },
         data: {
@@ -87,6 +86,10 @@ export const profileRouter = router({
         },
         include: { savedArticles: true }
       });
+
+      // --- NEW: Check Badges (e.g. "Curator") ---
+      // We run this asynchronously
+      gamificationService.checkAndAwardBadges(userId).catch(console.error);
 
       return { 
         isSaved: !isSaved,
