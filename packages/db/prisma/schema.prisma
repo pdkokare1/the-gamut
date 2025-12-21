@@ -9,13 +9,16 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// --- 1. Article Model (The Core News Item) ---
+// ==========================================
+// 1. CORE DATA: ARTICLES & NARRATIVES
+// ==========================================
+
 model Article {
   id              String   @id @default(auto()) @map("_id") @db.ObjectId
   headline        String
   summary         String
   
-  // Filters & Metadata
+  // -- Metadata & Filters --
   source          String
   category        String
   politicalLean   String
@@ -25,15 +28,15 @@ model Article {
   audioUrl        String?
   publishedAt     DateTime @default(now())
   
-  // AI Analysis (Gemini 2.5 Data)
+  // -- AI Analysis --
   analysisType    AnalysisType @default(Full)
   sentiment       Sentiment    @default(Neutral)
   analysisVersion String       @default("Gemini-2.5")
   
-  // Scores
+  // -- Scoring & Metrics --
   biasScore            Float    @default(0)
   biasLabel            String?
-  biasComponents       Json?    
+  biasComponents       Json?    // Replaces Schema.Types.Mixed
   
   credibilityScore     Float    @default(0)
   credibilityGrade     String?
@@ -45,20 +48,21 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-  
-  // Coverage Stats (Left/Center/Right balance)
+
+  // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
   coverageRight  Float @default(0)
   
-  // Clustering (Grouping similar stories)
+  // -- Clustering --
   clusterId      Int?
   clusterTopic   String?
   country        String  @default("Global")
   primaryNoun    String?
   secondaryNoun  String?
   
-  // Vector Embeddings (For "Smart Search" & Recommendations)
+  // -- Vector Data --
+  // Note: Prisma does not support 'select: false'. We will exclude this field in API queries manually.
   embedding      Float[]
   
   keyFindings     String[]
@@ -67,63 +71,23 @@ model Article {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  // Relations
+  // -- Relations --
+  // "savedByProfiles" allows us to find users who saved this article (New Feature)
   savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id])
   savedByProfileIds String[]      @db.ObjectId
 
   activityLogs      ActivityLog[]
 
-  // Indexes for Performance (Matching old Mongoose Compound Indexes)
+  // -- Indexes --
+  // Mapped from old Mongoose Compound Indexes
   @@index([category, politicalLean, publishedAt])
-  @@index([politicalLean, trustScore])
-  @@index([clusterId, publishedAt])
-  @@index([country, category, publishedAt])
+  @@index([politicalLean, trustScore, publishedAt]) // Trusted News Feed
+  @@index([clusterId, publishedAt])                 // Cluster View
+  @@index([country, category, publishedAt])         // Regional News
+  
+  // Note: Text Indexes (headline: 'text') must be created in MongoDB Atlas directly.
 }
 
-// --- 2. Profile Model (The User) ---
-model Profile {
-  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
-  userId                String   @unique // Firebase Auth ID
-  email                 String   @unique
-  username              String   @unique
-  
-  // User Stats
-  articlesViewedCount    Int      @default(0)
-  comparisonsViewedCount Int      @default(0)
-  articlesSharedCount    Int      @default(0)
-  
-  // Gamification
-  currentStreak         Int      @default(0)
-  lastActiveDate        DateTime @default(now())
-  badges                Badge[]
-  
-  // Relations
-  savedArticles         Article[] @relation(fields: [savedArticleIds], references: [id])
-  savedArticleIds       String[]  @db.ObjectId
-  
-  // AI Personalization Vector
-  userEmbedding         Float[]
-  
-  // Push Notifications
-  fcmToken              String?
-  notificationsEnabled  Boolean  @default(false)
-  
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
-  
-  activityLogs          ActivityLog[]
-}
-
-// Composite Type for Badges (Stored inside Profile)
-type Badge {
-  id          String
-  label       String
-  icon        String
-  description String
-  earnedAt    DateTime @default(now())
-}
-
-// --- 3. Narrative Model (The "Gamut" Overview) ---
 model Narrative {
   id               String   @id @default(auto()) @map("_id") @db.ObjectId
   clusterId        Int      @unique
@@ -136,27 +100,55 @@ model Narrative {
   sources          String[]
   
   consensusPoints  String[]
-  
-  divergencePoints DivergencePoint[]
+  divergencePoints DivergencePoint[] // Uses Composite Type below
 
   category         String?
   country          String?
-  
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+  
+  // Mongoose had a TTL index of 14 days. 
+  // You should verify this index exists in Atlas: { updatedAt: 1 }, { expireAfterSeconds: 1209600 }
 }
 
-type DivergencePoint {
-  point        String
-  perspectives Perspective[]
+// ==========================================
+// 2. USER DATA: PROFILES & ACTIVITY
+// ==========================================
+
+model Profile {
+  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId                String   @unique // Auth ID (Firebase)
+  email                 String   @unique
+  username              String   @unique
+  
+  // -- Stats --
+  articlesViewedCount    Int      @default(0)
+  comparisonsViewedCount Int      @default(0)
+  articlesSharedCount    Int      @default(0)
+  
+  // -- Gamification --
+  currentStreak         Int      @default(0)
+  lastActiveDate        DateTime @default(now())
+  badges                Badge[]
+  
+  // -- Saved Content --
+  savedArticles         Article[] @relation(fields: [savedArticleIds], references: [id])
+  savedArticleIds       String[]  @db.ObjectId
+  
+  // -- Personalization --
+  userEmbedding         Float[]
+  
+  // -- Notifications --
+  fcmToken              String?
+  notificationsEnabled  Boolean  @default(false)
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  
+  activityLogs          ActivityLog[]
 }
 
-type Perspective {
-  source String
-  stance String
-}
-
-// --- 4. Activity Log (Analytics) ---
 model ActivityLog {
   id        String   @id @default(auto()) @map("_id") @db.ObjectId
   
@@ -169,23 +161,28 @@ model ActivityLog {
   action    ActionType @default(view_analysis)
   timestamp DateTime   @default(now())
 
+  // Optimized for "Get user history"
   @@index([userId, timestamp(sort: Desc)])
+  // Optimized for "Get specific action history"
+  @@index([userId, action, timestamp(sort: Desc)])
 }
 
-// --- 5. AI Prompt (System Instructions) ---
+// ==========================================
+// 3. SYSTEM & UTILITIES
+// ==========================================
+
 model Prompt {
-  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
   type        PromptType @unique
   text        String
-  version     Int      @default(1)
-  active      Boolean  @default(true)
+  version     Int        @default(1)
+  active      Boolean    @default(true)
   description String?
   
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 }
 
-// --- 6. Emergency Contact (Resources) ---
 model EmergencyContact {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   category    String
@@ -201,7 +198,6 @@ model EmergencyContact {
   updatedAt   DateTime @updatedAt
 }
 
-// --- 7. System Config & Cache ---
 model SystemConfig {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
@@ -217,9 +213,34 @@ model Cache {
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  @@index([expiresAt])
 }
 
-// --- Enums (Strict Choices) ---
+// ==========================================
+// 4. TYPES & ENUMS (STRICT TYPING)
+// ==========================================
+
+// Composite Types (Embedded Documents)
+type Badge {
+  id          String
+  label       String
+  icon        String
+  description String
+  earnedAt    DateTime @default(now())
+}
+
+type DivergencePoint {
+  point        String
+  perspectives Perspective[]
+}
+
+type Perspective {
+  source String
+  stance String
+}
+
+// Enums (Replaces String checks)
 enum AnalysisType {
   Full
   SentimentOnly
