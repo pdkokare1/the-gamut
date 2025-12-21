@@ -1,0 +1,244 @@
+// packages/db/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// --- 1. Article Model (The Core News Item) ---
+model Article {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  headline        String
+  summary         String
+  
+  // Filters & Metadata
+  source          String
+  category        String
+  politicalLean   String
+  
+  url             String   @unique
+  imageUrl        String?
+  audioUrl        String?
+  publishedAt     DateTime @default(now())
+  
+  // AI Analysis (Gemini 2.5 Data)
+  analysisType    AnalysisType @default(Full)
+  sentiment       Sentiment    @default(Neutral)
+  analysisVersion String       @default("Gemini-2.5")
+  
+  // Scores
+  biasScore            Float    @default(0)
+  biasLabel            String?
+  biasComponents       Json?    
+  
+  credibilityScore     Float    @default(0)
+  credibilityGrade     String?
+  credibilityComponents Json?
+  
+  reliabilityScore     Float    @default(0)
+  reliabilityGrade     String?
+  reliabilityComponents Json?
+  
+  trustScore           Float    @default(0)
+  trustLevel           String?
+  
+  // Coverage Stats (Left/Center/Right balance)
+  coverageLeft   Float @default(0)
+  coverageCenter Float @default(0)
+  coverageRight  Float @default(0)
+  
+  // Clustering (Grouping similar stories)
+  clusterId      Int?
+  clusterTopic   String?
+  country        String  @default("Global")
+  primaryNoun    String?
+  secondaryNoun  String?
+  
+  // Vector Embeddings (For "Smart Search" & Recommendations)
+  embedding      Float[]
+  
+  keyFindings     String[]
+  recommendations String[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  savedByProfiles Profile[] @relation(fields: [savedByProfileIds], references: [id])
+  savedByProfileIds String[] @db.ObjectId
+
+  activityLogs    ActivityLog[]
+
+  // Indexes for Performance
+  @@index([category, politicalLean, publishedAt])
+  @@index([politicalLean, trustScore])
+  @@index([clusterId, publishedAt])
+}
+
+// --- 2. Profile Model (The User) ---
+model Profile {
+  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId                String   @unique // Firebase Auth ID
+  email                 String   @unique
+  username              String   @unique
+  
+  // User Stats
+  articlesViewedCount    Int      @default(0)
+  comparisonsViewedCount Int      @default(0)
+  articlesSharedCount    Int      @default(0)
+  
+  // Gamification
+  currentStreak         Int      @default(0)
+  lastActiveDate        DateTime @default(now())
+  badges                Badge[]
+  
+  // Relations
+  savedArticles         Article[] @relation(fields: [savedArticleIds], references: [id])
+  savedArticleIds       String[]  @db.ObjectId
+  
+  // AI Personalization Vector
+  userEmbedding         Float[]
+  
+  // Push Notifications
+  fcmToken              String?
+  notificationsEnabled  Boolean  @default(false)
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  
+  activityLogs          ActivityLog[]
+}
+
+// Composite Type for Badges (Stored inside Profile)
+type Badge {
+  id          String
+  label       String
+  icon        String
+  description String
+  earnedAt    DateTime @default(now())
+}
+
+// --- 3. Narrative Model (The "Gamut" Overview) ---
+model Narrative {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  clusterId        Int      @unique
+  lastUpdated      DateTime @default(now())
+  
+  masterHeadline   String
+  executiveSummary String
+  
+  sourceCount      Int      @default(0)
+  sources          String[]
+  
+  consensusPoints  String[]
+  
+  divergencePoints DivergencePoint[]
+
+  category         String?
+  country          String?
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+type DivergencePoint {
+  point        String
+  perspectives Perspective[]
+}
+
+type Perspective {
+  source String
+  stance String
+}
+
+// --- 4. Activity Log (Analytics) ---
+model ActivityLog {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  
+  user      Profile  @relation(fields: [userId], references: [userId])
+  userId    String   
+  
+  article   Article? @relation(fields: [articleId], references: [id])
+  articleId String?  @db.ObjectId
+  
+  action    ActionType @default(view_analysis)
+  timestamp DateTime   @default(now())
+
+  @@index([userId, timestamp(sort: Desc)])
+}
+
+// --- 5. AI Prompt (System Instructions) ---
+model Prompt {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  type        PromptType @unique
+  text        String
+  version     Int      @default(1)
+  active      Boolean  @default(true)
+  description String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// --- 6. Emergency Contact (Resources) ---
+model EmergencyContact {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  category    String
+  serviceName String
+  description String?
+  number      String
+  scope       String
+  hours       String   @default("24x7")
+  country     String   @default("India")
+  isGlobal    Boolean  @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// --- 7. System Config & Cache ---
+model SystemConfig {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
+  value       String[]
+  lastUpdated DateTime @default(now())
+}
+
+model Cache {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  key       String   @unique
+  data      Json
+  expiresAt DateTime
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// --- Enums (Strict Choices) ---
+enum AnalysisType {
+  Full
+  SentimentOnly
+}
+
+enum Sentiment {
+  Positive
+  Negative
+  Neutral
+}
+
+enum ActionType {
+  view_analysis
+  view_comparison
+  share_article
+  read_external
+}
+
+enum PromptType {
+  ANALYSIS
+  GATEKEEPER
+  ENTITY_EXTRACTION
+}
