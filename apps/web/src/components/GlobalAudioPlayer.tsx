@@ -1,10 +1,23 @@
 import { useAudio } from "../context/AudioContext";
 import { Button } from "./ui/button";
-import { Play, Pause, X, SkipBack, SkipForward, Loader2, Volume2 } from "lucide-react";
+import { Play, Pause, X, SkipBack, SkipForward, Loader2, Volume2, StepBack, StepForward } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function GlobalAudioPlayer() {
-  const { currentTrack, isPlaying, isLoading, togglePlay, closePlayer, progress, duration, seek } = useAudio();
+  const { 
+    currentTrack, 
+    isPlaying, 
+    isLoading, 
+    togglePlay, 
+    closePlayer, 
+    progress, 
+    duration, 
+    seek,
+    queue,
+    playNext,
+    playPrevious,
+    currentIndex
+  } = useAudio();
 
   if (!currentTrack) return null;
 
@@ -15,14 +28,17 @@ export function GlobalAudioPlayer() {
     return `${min}:${sec < 10 ? '0' : ''}${sec}`;
   };
 
+  const hasNext = queue.length > 0 && currentIndex < queue.length - 1;
+  const hasPrev = queue.length > 0 && currentIndex > 0;
+
   return (
     // Fixed Positioning:
-    // - bottom-[5rem] on mobile (to clear BottomNav)
+    // - bottom-[4.5rem] on mobile (to clear BottomNav)
     // - bottom-0 on desktop
-    <div className="fixed bottom-[4.5rem] md:bottom-0 left-0 right-0 z-40 animate-in slide-in-from-bottom-10 duration-500">
+    <div className="fixed bottom-[4.5rem] md:bottom-0 left-0 right-0 z-50 animate-in slide-in-from-bottom-10 duration-500">
       
       {/* Glass Container */}
-      <div className="glass border-t border-white/10 backdrop-blur-xl bg-background/80 md:bg-background/60 shadow-[0_-8px_30px_rgba(0,0,0,0.3)]">
+      <div className="glass border-t border-white/10 backdrop-blur-xl bg-background/90 md:bg-background/80 shadow-[0_-8px_30px_rgba(0,0,0,0.3)]">
         
         {/* Progress Bar (Top Edge) */}
         <div 
@@ -69,14 +85,26 @@ export function GlobalAudioPlayer() {
 
           {/* 2. Controls (Centered) */}
           <div className="flex flex-col items-center justify-center gap-1 absolute left-1/2 -translate-x-1/2 md:static md:translate-x-0 md:flex-1">
-            <div className="flex items-center gap-3 md:gap-6">
+            <div className="flex items-center gap-4 md:gap-6">
+              
+              {/* Previous Track (Only if in Queue) */}
+              <button 
+                 className={cn("text-muted-foreground hover:text-primary transition-colors hidden md:block", !hasPrev && "opacity-30 cursor-not-allowed")}
+                 onClick={playPrevious}
+                 disabled={!hasPrev}
+              >
+                  <StepBack size={20} />
+              </button>
+
+              {/* Seek Back -15s */}
               <button 
                 className="hidden md:block text-muted-foreground hover:text-primary transition-colors" 
                 onClick={() => seek(progress - 15)}
               >
-                  <SkipBack size={20} />
+                  <SkipBack size={18} />
               </button>
               
+              {/* Main Play/Pause */}
               <Button 
                   size="icon" 
                   className={cn(
@@ -94,11 +122,21 @@ export function GlobalAudioPlayer() {
                 )}
               </Button>
 
+              {/* Seek Forward +15s */}
               <button 
                 className="hidden md:block text-muted-foreground hover:text-primary transition-colors" 
                 onClick={() => seek(progress + 15)}
               >
-                  <SkipForward size={20} />
+                  <SkipForward size={18} />
+              </button>
+
+              {/* Next Track (Only if in Queue) */}
+              <button 
+                 className={cn("text-muted-foreground hover:text-primary transition-colors", !hasNext && "opacity-30 cursor-not-allowed")}
+                 onClick={playNext}
+                 disabled={!hasNext}
+              >
+                  <StepForward size={20} />
               </button>
             </div>
           </div>
