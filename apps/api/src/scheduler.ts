@@ -1,18 +1,17 @@
-import { Queue } from 'bullmq';
-import { config, redis } from './config';
-
-const newsQueue = new Queue('news-queue', { connection: redis });
+// apps/api/src/scheduler.ts
+import { newsQueue } from './jobs/queue';
 
 export async function initScheduler() {
   console.log('⏰ Initializing Scheduler...');
 
-  // Remove old repeatable jobs to avoid duplicates on restart
+  // Clean up old repeatable jobs to prevents duplicates on deployment
   const repeatableJobs = await newsQueue.getRepeatableJobs();
   for (const job of repeatableJobs) {
     await newsQueue.removeRepeatableByKey(job.key);
   }
 
-  // Add the recurring job (Runs every 1 hour)
+  // Add the Master Cron Job
+  // This job triggers the "Fetch" phase every hour
   await newsQueue.add(
     'fetch-latest-news',
     {}, 
@@ -20,8 +19,6 @@ export async function initScheduler() {
       repeat: {
         every: 60 * 60 * 1000, // 1 Hour
       },
-      removeOnComplete: true, // Keep Redis clean
-      removeOnFail: 50 // Keep last 50 failed jobs for debugging
     }
   );
 
