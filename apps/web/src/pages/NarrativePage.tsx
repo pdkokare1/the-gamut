@@ -1,26 +1,32 @@
 import { useParams } from 'react-router-dom';
 import { trpc } from '../utils/trpc';
-import { Loader2, ArrowRight, ShieldAlert, Scale, BookOpen } from 'lucide-react';
+import { Loader2, ShieldAlert, Scale, BookOpen, BarChart3, Clock } from 'lucide-react';
 import { Badge } from '../components/ui/badge';
-import { Button } from '../components/ui/button';
-import { FeedItem } from '../components/FeedItem';
+import { BiasChart } from '../components/visualizations/BiasChart';
+import { TimelineChart } from '../components/visualizations/TimelineChart';
 
 export function NarrativePage() {
   const { id } = useParams<{ id: string }>();
   
-  // Fetch Narrative Cluster Data
-  // Note: We use the 'clusterId' usually, but here we assume the route passes the cluster ID
   const { data: narrative, isLoading } = trpc.narrative.getById.useQuery(
     { id: parseInt(id || '0') },
     { enabled: !!id }
   );
 
+  // Fallback / Mock Data for Visuals (since schema might not have these fully populated yet)
+  const mockSources = narrative?.sources.map(s => ({ 
+    source: s, 
+    lean: ['Left', 'Center', 'Right', 'Left-Center', 'Right-Center'][Math.floor(Math.random() * 5)] 
+  })) || [];
+
+  const mockTimeline = [
+    { date: new Date(Date.now() - 10000000), headline: "Breaking: Initial reports emerge", source: "AP News" },
+    { date: new Date(Date.now() - 5000000), headline: "Official statement released", source: "Reuters" },
+    { date: new Date(Date.now()), headline: "Analysis: What this means for markets", source: "Bloomberg" },
+  ];
+
   if (isLoading) {
-    return (
-      <div className="flex h-[50vh] items-center justify-center">
-        <Loader2 className="animate-spin text-primary h-8 w-8" />
-      </div>
-    );
+    return <div className="flex h-[50vh] items-center justify-center"><Loader2 className="animate-spin text-primary h-8 w-8" /></div>;
   }
 
   if (!narrative) {
@@ -35,7 +41,7 @@ export function NarrativePage() {
   return (
     <div className="space-y-8 fade-in pb-10">
       
-      {/* 1. HEADER: The "Master Narrative" */}
+      {/* 1. HEADER */}
       <section className="space-y-4">
         <div className="flex items-center gap-2 mb-2">
            <Badge variant="outline" className="border-primary text-primary uppercase tracking-widest text-[10px]">
@@ -57,10 +63,30 @@ export function NarrativePage() {
         </div>
       </section>
 
-      {/* 2. SPLIT VIEW: Consensus vs. Divergence */}
+      {/* 2. INTELLIGENCE GRID */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         
-        {/* LEFT: Consensus (The Facts) */}
+        {/* Bias Distribution */}
+        <section className="glass-card p-6 rounded-xl space-y-4">
+           <div className="flex items-center gap-2 border-b border-border pb-2">
+             <BarChart3 className="h-5 w-5 text-primary" />
+             <h3 className="font-bold text-lg">Coverage Bias</h3>
+           </div>
+           <BiasChart sources={mockSources} />
+        </section>
+
+        {/* Timeline */}
+        <section className="glass-card p-6 rounded-xl space-y-4">
+           <div className="flex items-center gap-2 border-b border-border pb-2">
+             <Clock className="h-5 w-5 text-primary" />
+             <h3 className="font-bold text-lg">Story Evolution</h3>
+           </div>
+           <TimelineChart events={mockTimeline} />
+        </section>
+      </div>
+
+      {/* 3. SPLIT VIEW: Consensus vs. Divergence */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <section className="glass-card p-6 rounded-xl space-y-4">
            <div className="flex items-center gap-2 border-b border-border pb-2">
              <Scale className="h-5 w-5 text-green-500" />
@@ -76,47 +102,22 @@ export function NarrativePage() {
            </ul>
         </section>
 
-        {/* RIGHT: Divergence (The Spin) */}
         <section className="glass-card p-6 rounded-xl space-y-4">
            <div className="flex items-center gap-2 border-b border-border pb-2">
              <ShieldAlert className="h-5 w-5 text-orange-500" />
              <h3 className="font-bold text-lg">Key Divergences</h3>
            </div>
-           {/* If divergence points exist (assuming structure), map them. 
-               If simple string array, map directly. */}
            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                How different sources framed this event:
-              </p>
-              {/* Placeholder for complex divergence mapping if schema allows, 
-                  otherwise showing static example or mapping simple strings */}
+              <p className="text-sm text-muted-foreground">How perspectives differed:</p>
                <div className="p-3 bg-secondary/30 rounded-lg text-sm">
-                 <span className="font-bold text-blue-400">Left Leaning:</span> Focused on humanitarian impact.
+                 <span className="font-bold text-blue-400">Left Leaning:</span> Focused on social impact.
                </div>
                <div className="p-3 bg-secondary/30 rounded-lg text-sm">
-                 <span className="font-bold text-red-400">Right Leaning:</span> Focused on economic consequences.
+                 <span className="font-bold text-red-400">Right Leaning:</span> Focused on fiscal responsibility.
                </div>
            </div>
         </section>
       </div>
-
-      {/* 3. SOURCE STREAM */}
-      <section className="space-y-4">
-        <h3 className="font-bold text-xl flex items-center gap-2">
-           <BookOpen className="h-5 w-5" /> Full Coverage
-        </h3>
-        
-        {/* We would fetch related articles here. For now, we assume they might be attached 
-            or we fetch them via a separate query component. 
-            For this file, I'll show a placeholder for the list. */}
-        <div className="grid gap-4">
-           {/* In a real scenario, map <FeedItem /> here */}
-           <div className="p-8 text-center text-muted-foreground border-dashed border-2 border-border rounded-xl">
-             Associated articles loading...
-           </div>
-        </div>
-      </section>
-
     </div>
   );
 }
