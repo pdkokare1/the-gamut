@@ -1,51 +1,77 @@
+/* apps/web/src/index.css */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Playfair+Display:wght@700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    /* * LIGHT MODE (Creamy Luxury) 
+     * Converted from your Hex Codes to HSL for Tailwind opacity support 
+     */
+    --background: 40 20% 94%;      /* #F4F2EE */
+    --foreground: 0 0% 10%;        /* #1A1A1A */
+
+    --card: 0 0% 100%;             /* #FFFFFF */
+    --card-foreground: 0 0% 10%;   /* #1A1A1A */
+
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --popover-foreground: 0 0% 10%;
+
+    --primary: 35 32% 46%;         /* #9C7C50 (Bronze) */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 10%;
+
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+
+    --accent: 35 32% 46%;          
+    --accent-foreground: 0 0% 10%;
+
     --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 35 32% 46%;
+
+    --radius: 0.75rem; /* 12px -> 0.75rem */
   }
 
+  /* * DARK MODE (Default - Deep Obsidian)
+   * This matches your 'body.dark-mode' perfectly
+   */
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
+    --background: 0 0% 2%;        /* #050505 (Obsidian) */
+    --foreground: 0 0% 93%;       /* #EDEDED */
+
+    --card: 0 0% 8%;              /* #141414 */
+    --card-foreground: 0 0% 93%;
+
+    --popover: 0 0% 8%;
+    --popover-foreground: 0 0% 93%;
+
+    --primary: 46 65% 52%;        /* #D4AF37 (Metallic Gold) */
+    --primary-foreground: 0 0% 0%;
+
+    --secondary: 0 0% 12%;        /* Slightly lighter than bg */
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 63%; /* #A1A1A1 */
+
+    --accent: 46 65% 52%;
+    --accent-foreground: 0 0% 0%;
+
     --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 15%;           /* Subtle border */
+    --input: 0 0% 15%;
+    --ring: 46 65% 52%;
   }
 }
 
@@ -54,6 +80,39 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
+    /* Prevent pull-to-refresh on mobile */
+    overscroll-behavior-y: none;
+  }
+  
+  /* Hide scrollbar logic ported from index.css */
+  *::-webkit-scrollbar {
+    display: none;
+  }
+  * {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* * CUSTOM UTILITIES (Glassmorphism & Gradients) 
+ * Replaces your old CSS classes with Tailwind-friendly versions
+ */
+@layer utilities {
+  .glass {
+    @apply bg-background/70 backdrop-blur-xl border border-white/10 shadow-xl;
+  }
+  
+  .glass-card {
+    @apply bg-card/60 backdrop-blur-md border border-white/5;
+  }
+
+  .text-gradient-gold {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-[#D4AF37] to-[#AA8C2C];
+  }
+  
+  /* Smooth transitions for all interactive elements */
+  .hover-smooth {
+    @apply transition-all duration-300 ease-smooth;
   }
 }
