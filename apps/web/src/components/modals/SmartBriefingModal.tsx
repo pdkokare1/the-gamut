@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { type RouterOutputs } from '@/utils/trpc';
 
-// Infer Article type from your TRPC Router to ensure sync
+// Infer Article type from your TRPC Router to ensure strict type safety
 type Article = RouterOutputs['article']['getById'];
 
 interface SmartBriefingModalProps {
@@ -62,7 +62,7 @@ const SmartBriefingModal: React.FC<SmartBriefingModalProps> = ({ article, onClos
                 <span>•</span>
                 <Badge 
                   variant="outline" 
-                  className="cursor-help hover:bg-muted"
+                  className="cursor-help hover:bg-muted font-normal"
                   onClick={(e) => showTooltip("Bias Score (0-100). Lower is better.", e)}
                 >
                   <ShieldAlert className="w-3 h-3 mr-1" /> Bias {article.biasScore}
@@ -70,7 +70,7 @@ const SmartBriefingModal: React.FC<SmartBriefingModalProps> = ({ article, onClos
                 
                 <Badge 
                   variant="outline" 
-                  className="cursor-help hover:bg-muted"
+                  className="cursor-help hover:bg-muted font-normal"
                   onClick={(e) => showTooltip("Credibility Grade based on facts and sources.", e)}
                 >
                   <BadgeCheck className="w-3 h-3 mr-1" /> Grade {article.credibilityGrade}
