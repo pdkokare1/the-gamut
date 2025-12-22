@@ -1,89 +1,75 @@
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { useInView } from 'react-intersection-observer';
-import { trpc } from '../utils/trpc';
-import { FeedItem } from './FeedItem';
-import { Loader2, RefreshCcw } from 'lucide-react';
-import { Button } from './ui/button';
+import { trpc } from '@/utils/trpc';
+import { FeedItem } from '@/components/FeedItem'; // Uses the new FeedItem
+import { Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
-export function NewsFeed() {
-  // 1. TRPC Infinite Query
-  const {
-    data,
-    isLoading,
-    isError,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-    refetch
-  } = trpc.article.getFeed.useInfiniteQuery(
-    { limit: 10 },
-    {
-      getNextPageParam: (lastPage) => lastPage.nextCursor,
-      refetchOnWindowFocus: false, // Prevent jarring refreshes
-    }
-  );
+interface NewsFeedProps {
+  filters?: any; // You can strictly type this with your Filter state interface
+}
 
-  // 2. Intersection Observer for Infinite Scroll
+export const NewsFeed: React.FC<NewsFeedProps> = ({ filters }) => {
   const { ref, inView } = useInView();
 
+  // Infinite Query for Articles
+  const { 
+    data, 
+    isLoading, 
+    isError, 
+    fetchNextPage, 
+    hasNextPage, 
+    isFetchingNextPage 
+  } = trpc.article.getAll.useInfiniteQuery(
+    { limit: 10, ...filters }, // Pass filters directly to backend
+    { getNextPageParam: (lastPage) => lastPage.nextCursor }
+  );
+
+  // Auto-load more when scrolling to bottom
   useEffect(() => {
     if (inView && hasNextPage) {
       fetchNextPage();
     }
   }, [inView, hasNextPage, fetchNextPage]);
 
-  // 3. Loading State (Initial)
   if (isLoading) {
     return (
-      <div className="space-y-6 max-w-2xl mx-auto">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="h-64 rounded-xl bg-muted/50 animate-pulse" />
-        ))}
-      </div>
+       <div className="space-y-4 pt-4">
+          {[1, 2, 3].map((n) => (
+            <div key={n} className="h-48 w-full bg-muted/20 animate-pulse rounded-xl" />
+          ))}
+       </div>
     );
   }
 
-  // 4. Error State
   if (isError) {
     return (
-      <div className="text-center py-20 space-y-4">
-        <p className="text-muted-foreground">Unable to load the news stream.</p>
-        <Button onClick={() => refetch()} variant="outline" className="gap-2">
-          <RefreshCcw className="h-4 w-4" /> Try Again
-        </Button>
-      </div>
-    );
-  }
-
-  // 5. Flatten Pages
-  // data.pages is an array of responses (each with .items). We flatten this into one list.
-  const articles = data?.pages.flatMap((page) => page.items) || [];
-
-  if (articles.length === 0) {
-    return (
-      <div className="text-center py-20 text-muted-foreground">
-        No articles found. Check back later!
+      <div className="text-center py-20">
+         <p className="text-red-500">Failed to load feed.</p>
+         <Button variant="outline" onClick={() => window.location.reload()} className="mt-4">
+            Retry
+         </Button>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6 max-w-2xl mx-auto pb-8">
-      {/* Article List */}
-      {articles.map((article) => (
-        <FeedItem key={article.id} article={article} />
+    <div className="space-y-4 pb-10">
+      {data?.pages.map((page, i) => (
+        <React.Fragment key={i}>
+          {page.items.map((article: any) => (
+            <FeedItem key={article.id} article={article} />
+          ))}
+        </React.Fragment>
       ))}
 
-      {/* Loading More Indicator */}
-      <div ref={ref} className="flex justify-center py-8">
-        {isFetchingNextPage ? (
-          <Loader2 className="h-6 w-6 animate-spin text-primary" />
-        ) : hasNextPage ? (
-          <span className="text-xs text-muted-foreground">Scroll for more</span>
-        ) : (
-          <span className="text-xs text-muted-foreground">You're all caught up</span>
-        )}
+      {/* Loading Indicator for Next Page */}
+      <div ref={ref} className="h-20 flex items-center justify-center">
+         {isFetchingNextPage && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}
+         {!hasNextPage && data && (
+            <p className="text-sm text-muted-foreground">You've reached the end.</p>
+         )}
       </div>
     </div>
   );
-}
+};
