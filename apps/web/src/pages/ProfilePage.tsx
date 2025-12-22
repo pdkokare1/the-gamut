@@ -1,128 +1,162 @@
-import { trpc } from "../utils/trpc";
-import { auth } from "../lib/firebase";
-import { useAuthState } from "react-firebase-hooks/auth";
-import { Button } from "../components/ui/button";
-import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card";
-import { Badge } from "../components/ui/badge";
-import { GoogleAuthProvider, signInWithPopup } from "firebase/auth";
-import { Loader2, LogIn, Trophy, Flame, BookOpen } from "lucide-react";
+import { useState } from 'react';
+import { trpc } from '../utils/trpc';
+import { useAuth } from '../context/AuthContext';
+import { BadgeGrid } from '../components/profile/BadgeGrid';
+import { FeedItem } from '../components/FeedItem';
+import { Button } from '../components/ui/button';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'; // Built-in Radix or simple implementation below
+import { Settings, Flame, BookOpen, Share2, ShieldCheck, Loader2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 export function ProfilePage() {
-  const [user, loading] = useAuthState(auth);
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState("overview");
 
-  // Fetch Profile Data (only if logged in)
-  const { data: profile, isLoading: isProfileLoading } = trpc.profile.getMe.useQuery(
-    undefined, 
-    { enabled: !!user }
-  );
+  // Fetch Profile Data
+  const { data: profile, isLoading } = trpc.profile.getMyProfile.useQuery(undefined, {
+    enabled: !!user,
+  });
 
-  const login = () => signInWithPopup(auth, new GoogleAuthProvider());
-
-  if (loading || (user && isProfileLoading)) {
-    return <div className="flex justify-center p-10"><Loader2 className="animate-spin" /></div>;
+  if (isLoading) {
+    return <div className="flex h-[50vh] items-center justify-center"><Loader2 className="animate-spin text-primary" /></div>;
   }
 
-  if (!user) {
-    return (
-      <div className="flex flex-col items-center justify-center h-[60vh] space-y-4 text-center px-4">
-        <h2 className="text-2xl font-bold">Sign in to The Gamut</h2>
-        <p className="text-muted-foreground">Track your reading, save articles, and get personalized briefs.</p>
-        <Button onClick={login} size="lg">
-          <LogIn className="mr-2 h-4 w-4" /> Sign in with Google
-        </Button>
-      </div>
-    );
-  }
+  if (!profile) return null;
 
   return (
-    <div className="space-y-8 pb-20 px-4 pt-4">
-      {/* Header */}
-      <div className="flex items-center gap-4">
-        {user.photoURL ? (
-          <img src={user.photoURL} alt="Profile" className="h-16 w-16 rounded-full border-2 border-indigo-100" />
-        ) : (
-          <div className="h-16 w-16 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-xl">
-            {user.displayName?.[0] || 'U'}
+    <div className="space-y-6 fade-in">
+      {/* 1. HERO HEADER */}
+      <section className="relative rounded-2xl overflow-hidden glass p-6 md:p-10 flex flex-col md:flex-row items-center gap-6 border-b-4 border-primary">
+        
+        {/* Avatar Ring */}
+        <div className="relative">
+          <div className="w-24 h-24 rounded-full border-4 border-[#D4AF37] shadow-[0_0_15px_rgba(212,175,55,0.3)] p-1 bg-background">
+             <img 
+               src={user?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${profile.username}`} 
+               alt="Avatar" 
+               className="w-full h-full rounded-full object-cover"
+             />
           </div>
-        )}
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">{profile?.username || user.displayName}</h1>
-          <p className="text-slate-500 text-sm">{user.email}</p>
+          <div className="absolute -bottom-2 -right-2 bg-background p-1.5 rounded-full shadow-sm">
+            <div className="bg-primary text-[10px] text-primary-foreground font-bold px-2 py-0.5 rounded-full">
+              Lvl {Math.floor((profile.stats?.articlesViewed || 0) / 10) + 1}
+            </div>
+          </div>
         </div>
-      </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 gap-4">
-        <Card className="bg-orange-50 border-orange-100">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-bold text-orange-600 uppercase tracking-wider flex items-center">
-                <Flame size={14} className="mr-1" /> Streak
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-black text-slate-900">{profile?.currentStreak || 0} <span className="text-sm font-medium text-slate-500">Days</span></div>
-          </CardContent>
-        </Card>
-        <Card className="bg-blue-50 border-blue-100">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-bold text-blue-600 uppercase tracking-wider flex items-center">
-                <BookOpen size={14} className="mr-1" /> Read
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-black text-slate-900">{profile?.articlesViewedCount || 0} <span className="text-sm font-medium text-slate-500">Articles</span></div>
-          </CardContent>
-        </Card>
-      </div>
+        {/* User Info */}
+        <div className="flex-1 text-center md:text-left">
+          <h1 className="text-3xl font-logo font-bold">{profile.username}</h1>
+          <p className="text-muted-foreground text-sm">Member since {new Date(profile.createdAt).getFullYear()}</p>
+          
+          {/* Quick Stats Bar */}
+          <div className="flex items-center justify-center md:justify-start gap-4 mt-4">
+             <div className="flex items-center gap-1.5 bg-secondary/50 px-3 py-1 rounded-full">
+               <Flame className="h-4 w-4 text-orange-500 fill-orange-500" />
+               <span className="font-bold text-sm">{profile.gamification.streak} Day Streak</span>
+             </div>
+             <div className="flex items-center gap-1.5 px-3 py-1">
+               <span className="text-sm text-muted-foreground">{profile.stats.articlesViewed} Reads</span>
+             </div>
+          </div>
+        </div>
 
-      {/* Badges Section (New) */}
-      <div>
-        <h2 className="text-lg font-bold text-slate-900 mb-3 flex items-center">
-            <Trophy size={18} className="mr-2 text-yellow-500" /> Achievements
-        </h2>
-        {profile?.badges && profile.badges.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {profile.badges.map((badge) => (
-                    <div key={badge.id} className="flex items-center p-3 bg-white border border-slate-100 rounded-xl shadow-sm">
-                        <div className="text-2xl mr-3">{badge.icon}</div>
-                        <div>
-                            <div className="font-bold text-sm text-slate-800">{badge.label}</div>
-                            <div className="text-xs text-slate-500">{badge.description}</div>
-                        </div>
-                    </div>
-                ))}
+        {/* Settings Action */}
+        <Link to="/settings">
+          <Button variant="outline" size="icon" className="absolute top-4 right-4 md:static">
+            <Settings className="h-4 w-4" />
+          </Button>
+        </Link>
+      </section>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        
+        {/* 2. LEFT COLUMN: STATS & BADGES */}
+        <div className="space-y-6">
+          {/* Stat Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-1 gap-4">
+            <div className="glass-card p-4 rounded-xl flex items-center gap-4">
+              <div className="p-3 bg-blue-500/10 rounded-lg text-blue-500">
+                <BookOpen className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">{profile.stats.articlesViewed}</p>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Articles</p>
+              </div>
             </div>
-        ) : (
-            <div className="p-6 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200 text-slate-500 text-sm">
-                Read more articles to unlock your first badge!
-            </div>
-        )}
-      </div>
 
-      {/* Saved Articles */}
-      <div>
-        <h2 className="text-lg font-bold text-slate-900 mb-3">Saved Articles</h2>
-        {(!profile?.savedArticles || profile.savedArticles.length === 0) ? (
-          <p className="text-slate-500 text-sm italic">You haven't saved any articles yet.</p>
-        ) : (
-          <div className="grid gap-3">
-            {profile.savedArticles.map((article) => (
-              <Card key={article.id} className="hover:shadow-md transition-shadow">
-                <CardHeader className="p-4">
-                  <div className="flex justify-between items-start gap-2">
-                     <CardTitle className="text-sm font-bold leading-snug">{article.headline}</CardTitle>
-                     <Badge variant="secondary" className="text-[10px] shrink-0">{article.source}</Badge>
-                  </div>
-                </CardHeader>
-              </Card>
+            <div className="glass-card p-4 rounded-xl flex items-center gap-4">
+              <div className="p-3 bg-green-500/10 rounded-lg text-green-500">
+                <ShieldCheck className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">Top 10%</p>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Reader Rank</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Badges Module */}
+          <div className="glass-card p-5 rounded-xl space-y-4">
+            <h3 className="font-bold font-logo text-lg">Achievements</h3>
+            <BadgeGrid earnedBadges={profile.gamification.badges} />
+          </div>
+        </div>
+
+        {/* 3. RIGHT COLUMN: CONTENT TABS */}
+        <div className="md:col-span-2 space-y-6">
+          {/* Simple Tab Switcher (Tailwind) */}
+          <div className="flex gap-2 border-b border-border pb-1">
+            {['overview', 'saved', 'history'].map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${
+                  activeTab === tab 
+                    ? 'border-primary text-primary' 
+                    : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </button>
             ))}
           </div>
-        )}
-      </div>
 
-      <Button variant="outline" onClick={() => auth.signOut()} className="w-full text-red-600 hover:text-red-700 hover:bg-red-50 border-red-100">
-        Sign Out
-      </Button>
+          {/* Tab Content */}
+          <div className="min-h-[300px]">
+            {activeTab === 'overview' && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+                 <h3 className="text-lg font-semibold">Recommended for you</h3>
+                 <p className="text-muted-foreground text-sm">Based on your recent history...</p>
+                 {/* Reuse FeedItem but maybe map a 'recommended' list if available */}
+                 <div className="p-8 text-center text-muted-foreground border-2 border-dashed rounded-xl">
+                   Your recommendations will appear here.
+                 </div>
+              </div>
+            )}
+
+            {activeTab === 'saved' && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+                {profile.savedArticles.length === 0 ? (
+                  <div className="text-center py-10">
+                    <p className="text-muted-foreground">No saved articles yet.</p>
+                  </div>
+                ) : (
+                  profile.savedArticles.map((article: any) => (
+                    <FeedItem key={article.id} article={article} />
+                  ))
+                )}
+              </div>
+            )}
+
+            {activeTab === 'history' && (
+               <div className="text-center py-10 text-muted-foreground">
+                 History view coming soon.
+               </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
