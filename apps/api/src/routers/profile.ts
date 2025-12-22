@@ -1,99 +1,121 @@
 import { z } from 'zod';
-import { router, protectedProcedure } from '../trpc';
+import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { TRPCError } from '@trpc/server';
-import { gamificationService } from '../services/gamification'; // New Import
 
 export const profileRouter = router({
-  // 1. Get My Profile
+  // 1. GET CURRENT PROFILE
+  // Replaces: GET /api/profile/me
   getMe: protectedProcedure.query(async ({ ctx }) => {
-    const { uid, email, name } = ctx.user;
-
-    let profile = await ctx.prisma.profile.findUnique({
-      where: { userId: uid },
-      include: { savedArticles: true },
+    const profile = await ctx.prisma.profile.findUnique({
+      where: { userId: ctx.user.uid },
     });
 
     if (!profile) {
-      profile = await ctx.prisma.profile.create({
+      // Auto-create profile if it doesn't exist (First time login)
+      // This handles the "Sign Up" flow seamlessly
+      return ctx.prisma.profile.create({
         data: {
-          userId: uid,
-          email: email || '',
-          username: name || `User_${uid.slice(0, 5)}`,
-          savedArticles: { connect: [] },
-          currentStreak: 1,
-          lastActiveDate: new Date(),
+          userId: ctx.user.uid,
+          email: ctx.user.email || '',
+          username: ctx.user.email?.split('@')[0] || `user_${Date.now()}`,
         },
-        include: { savedArticles: true },
       });
-    } else {
-        // Streak Logic
-        const lastActive = new Date(profile.lastActiveDate);
-        const now = new Date();
-        const diffTime = Math.abs(now.getTime() - lastActive.getTime());
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-        let newStreak = profile.currentStreak;
-        if (diffDays > 2) { 
-            newStreak = 1; 
-        } else if (diffDays >= 1 && diffDays <= 2) {
-            newStreak += 1;
-        }
-
-        if (diffDays >= 1) {
-            profile = await ctx.prisma.profile.update({
-                where: { id: profile.id },
-                data: {
-                    lastActiveDate: now,
-                    currentStreak: newStreak
-                },
-                include: { savedArticles: true }
-            });
-        }
     }
 
-    // --- NEW: Check for Badges on Load ---
-    // This ensures if they hit a milestone (like a streak), they see it immediately
-    await gamificationService.checkAndAwardBadges(uid);
-    
-    // Re-fetch to get latest badges
-    return ctx.prisma.profile.findUnique({
-        where: { userId: uid },
-        include: { savedArticles: true }
-    });
+    return profile;
   }),
 
-  // 2. Toggle Saved Article
+  // 2. UPDATE PROFILE
+  // Replaces: PUT /api/profile/update
+  update: protectedProcedure
+    .input(
+      z.object({
+        username: z.string().min(3).optional(),
+        notificationsEnabled: z.boolean().optional(),
+        fcmToken: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Check uniqueness if updating username
+      if (input.username) {
+        const existing = await ctx.prisma.profile.findUnique({
+          where: { username: input.username },
+        });
+        if (existing && existing.userId !== ctx.user.uid) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: 'Username already taken',
+          });
+        }
+      }
+
+      return ctx.prisma.profile.update({
+        where: { userId: ctx.user.uid },
+        data: input,
+      });
+    }),
+
+  // 3. TOGGLE SAVED ARTICLE
+  // Replaces: POST /api/profile/save and DELETE /api/profile/save
   toggleSave: protectedProcedure
     .input(z.object({ articleId: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const userId = ctx.user.uid;
-
+      // First, check if it's currently saved
       const profile = await ctx.prisma.profile.findUnique({
-        where: { userId },
-        include: { savedArticles: true },
+        where: { userId: ctx.user.uid },
+        select: { savedArticleIds: true },
       });
 
       if (!profile) throw new TRPCError({ code: 'NOT_FOUND' });
 
-      const isSaved = profile.savedArticles.some((a) => a.id === input.articleId);
+      const isSaved = profile.savedArticleIds.includes(input.articleId);
 
-      const updatedProfile = await ctx.prisma.profile.update({
-        where: { userId },
+      // Perform the update
+      await ctx.prisma.profile.update({
+        where: { userId: ctx.user.uid },
         data: {
           savedArticles: isSaved
-            ? { disconnect: { id: input.articleId } }
-            : { connect: { id: input.articleId } },
+            ? { disconnect: { id: input.articleId } } // Remove if saved
+            : { connect: { id: input.articleId } },   // Add if not saved
         },
-        include: { savedArticles: true }
       });
 
-      // --- NEW: Check Badges (e.g. "Curator") ---
-      // We run this asynchronously
-      gamificationService.checkAndAwardBadges(userId).catch(console.error);
+      return { isSaved: !isSaved };
+    }),
 
-      return { 
-        isSaved: !isSaved,
-        savedArticleIds: updatedProfile.savedArticles.map(a => a.id)
-      };
+  // 4. GET SAVED ARTICLES
+  // Replaces: GET /api/profile/saved
+  getSavedArticles: protectedProcedure.query(async ({ ctx }) => {
+    const profile = await ctx.prisma.profile.findUnique({
+      where: { userId: ctx.user.uid },
+      select: {
+        savedArticles: {
+          orderBy: { publishedAt: 'desc' },
+          select: {
+            id: true,
+            headline: true,
+            summary: true,
+            imageUrl: true,
+            source: true,
+            publishedAt: true,
+            category: true,
+            sentiment: true,
+          },
+        },
+      },
+    });
+
+    return profile?.savedArticles || [];
+  }),
+  
+  // 5. CHECK USERNAME (Public)
+  // Used during onboarding to show "Username available" green checkmark
+  checkUsername: publicProcedure
+    .input(z.object({ username: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const count = await ctx.prisma.profile.count({
+        where: { username: input.username },
+      });
+      return { available: count === 0 };
     }),
 });
