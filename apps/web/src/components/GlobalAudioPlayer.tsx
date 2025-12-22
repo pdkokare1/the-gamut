@@ -1,78 +1,126 @@
 import { useAudio } from "../context/AudioContext";
 import { Button } from "./ui/button";
-import { Slider } from "./ui/slider"; // Ensure you have a slider or use standard input
-import { Play, Pause, X, SkipBack, SkipForward } from "lucide-react";
+import { Play, Pause, X, SkipBack, SkipForward, Loader2, Volume2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export function GlobalAudioPlayer() {
-  const { currentTrack, isPlaying, togglePlay, closePlayer, progress, duration, seek } = useAudio();
+  const { currentTrack, isPlaying, isLoading, togglePlay, closePlayer, progress, duration, seek } = useAudio();
 
   if (!currentTrack) return null;
 
   const formatTime = (time: number) => {
+    if (isNaN(time)) return "0:00";
     const min = Math.floor(time / 60);
     const sec = Math.floor(time % 60);
     return `${min}:${sec < 10 ? '0' : ''}${sec}`;
   };
 
   return (
-    <div className="fixed bottom-16 left-0 right-0 md:bottom-0 md:left-64 z-50 bg-white border-t border-slate-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] p-3">
-      <div className="max-w-4xl mx-auto flex items-center gap-4">
-        
-        {/* Track Info */}
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          {currentTrack.imageUrl && (
-            <img src={currentTrack.imageUrl} alt="Cover" className="h-10 w-10 rounded bg-slate-100 object-cover" />
-          )}
-          <div className="truncate">
-            <h4 className="text-sm font-bold text-slate-900 truncate">{currentTrack.title}</h4>
-            <p className="text-xs text-slate-500 truncate">{currentTrack.author || "The Gamut Audio"}</p>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="flex flex-col items-center flex-1">
-          <div className="flex items-center gap-4">
-            <button className="text-slate-400 hover:text-slate-600" onClick={() => seek(progress - 15)}>
-                <SkipBack size={20} />
-            </button>
-            <Button 
-                size="icon" 
-                className="h-10 w-10 rounded-full shadow-md bg-indigo-600 hover:bg-indigo-700 text-white" 
-                onClick={togglePlay}
-            >
-              {isPlaying ? <Pause size={20} /> : <Play size={20} fill="currentColor" />}
-            </Button>
-            <button className="text-slate-400 hover:text-slate-600" onClick={() => seek(progress + 15)}>
-                <SkipForward size={20} />
-            </button>
-          </div>
-        </div>
-
-        {/* Progress & Close */}
-        <div className="hidden md:flex items-center gap-3 w-1/3">
-             <span className="text-xs text-slate-400 w-10 text-right">{formatTime(progress)}</span>
-             <input 
-                type="range" 
-                min={0} 
-                max={duration || 100} 
-                value={progress} 
-                onChange={(e) => seek(Number(e.target.value))}
-                className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-             />
-             <span className="text-xs text-slate-400 w-10">{formatTime(duration)}</span>
-        </div>
-
-        <Button variant="ghost" size="icon" className="text-slate-400 hover:text-red-500" onClick={closePlayer}>
-          <X size={18} />
-        </Button>
-      </div>
+    // Fixed Positioning:
+    // - bottom-[5rem] on mobile (to clear BottomNav)
+    // - bottom-0 on desktop
+    <div className="fixed bottom-[4.5rem] md:bottom-0 left-0 right-0 z-40 animate-in slide-in-from-bottom-10 duration-500">
       
-      {/* Mobile Progress Bar (Visible only on small screens) */}
-      <div className="md:hidden absolute top-0 left-0 right-0 h-1 bg-slate-100">
-         <div 
-            className="h-full bg-indigo-600 transition-all duration-300" 
-            style={{ width: `${(progress / (duration || 1)) * 100}%` }}
-         />
+      {/* Glass Container */}
+      <div className="glass border-t border-white/10 backdrop-blur-xl bg-background/80 md:bg-background/60 shadow-[0_-8px_30px_rgba(0,0,0,0.3)]">
+        
+        {/* Progress Bar (Top Edge) */}
+        <div 
+            className="absolute top-0 left-0 right-0 h-1 bg-secondary cursor-pointer group"
+            onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const percent = x / rect.width;
+                seek(percent * duration);
+            }}
+        >
+            <div 
+                className="h-full bg-gradient-to-r from-[#D4AF37] to-[#AA8C2C] relative"
+                style={{ width: `${(progress / (duration || 1)) * 100}%` }}
+            >
+                {/* Scrub Handle (Visible on Hover) */}
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity" />
+            </div>
+        </div>
+
+        <div className="max-w-7xl mx-auto flex items-center justify-between p-3 md:py-4 gap-4">
+          
+          {/* 1. Track Info */}
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            {currentTrack.imageUrl ? (
+              <img 
+                src={currentTrack.imageUrl} 
+                alt="Cover" 
+                className="h-10 w-10 md:h-12 md:w-12 rounded-lg bg-secondary object-cover shadow-sm border border-white/10" 
+              />
+            ) : (
+              <div className="h-10 w-10 md:h-12 md:w-12 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center border border-primary/20">
+                <Volume2 className="h-5 w-5 text-primary" />
+              </div>
+            )}
+            
+            <div className="truncate flex-1">
+              <h4 className="text-sm font-bold text-foreground truncate">{currentTrack.title}</h4>
+              <p className="text-xs text-muted-foreground truncate font-medium">
+                {currentTrack.author || "The Gamut"}
+              </p>
+            </div>
+          </div>
+
+          {/* 2. Controls (Centered) */}
+          <div className="flex flex-col items-center justify-center gap-1 absolute left-1/2 -translate-x-1/2 md:static md:translate-x-0 md:flex-1">
+            <div className="flex items-center gap-3 md:gap-6">
+              <button 
+                className="hidden md:block text-muted-foreground hover:text-primary transition-colors" 
+                onClick={() => seek(progress - 15)}
+              >
+                  <SkipBack size={20} />
+              </button>
+              
+              <Button 
+                  size="icon" 
+                  className={cn(
+                    "h-10 w-10 md:h-12 md:w-12 rounded-full shadow-lg transition-all hover:scale-105",
+                    "bg-gradient-to-br from-[#D4AF37] to-[#AA8C2C] text-white border-0"
+                  )}
+                  onClick={togglePlay}
+              >
+                {isLoading ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                ) : isPlaying ? (
+                    <Pause className="h-5 w-5 md:h-6 md:w-6 fill-current" />
+                ) : (
+                    <Play className="h-5 w-5 md:h-6 md:w-6 fill-current ml-1" />
+                )}
+              </Button>
+
+              <button 
+                className="hidden md:block text-muted-foreground hover:text-primary transition-colors" 
+                onClick={() => seek(progress + 15)}
+              >
+                  <SkipForward size={20} />
+              </button>
+            </div>
+          </div>
+
+          {/* 3. Duration & Close */}
+          <div className="flex items-center justify-end flex-1 gap-3 md:gap-4">
+             <div className="hidden md:flex flex-col items-end text-[10px] font-mono text-muted-foreground leading-tight">
+               <span>{formatTime(progress)}</span>
+               <span>{formatTime(duration)}</span>
+             </div>
+
+             <Button 
+               variant="ghost" 
+               size="icon" 
+               className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-full h-8 w-8" 
+               onClick={closePlayer}
+             >
+               <X size={18} />
+             </Button>
+          </div>
+
+        </div>
       </div>
     </div>
   );
