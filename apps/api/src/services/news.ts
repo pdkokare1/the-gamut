@@ -1,11 +1,15 @@
 // apps/api/src/services/news.ts
+
 import crypto from 'crypto';
-import { z } from 'zod';
-import { config } from '../config';
-import keyManager from '../utils/KeyManager';
-import circuitBreaker from '../utils/CircuitBreaker';
+import { redis } from '../utils/redis';
 import logger from '../utils/logger';
-import { redis } from '../utils/redis'; // Assuming your redis utility exports the client instance
+import circuitBreaker from '../utils/CircuitBreaker';
+import keyManager from '../utils/KeyManager';
+
+// NEW IMPORTS
+import { prisma } from '@gamut/db';
+import { newsQueue } from '../jobs/queue';
+import { articleProcessor } from './articleProcessor';
 
 // --- Types ---
 export interface NewsItem {
@@ -16,7 +20,7 @@ export interface NewsItem {
   imageUrl?: string;
   publishedAt: Date;
   content?: string;
-  category?: string; // Added to track which category this came from
+  category?: string;
 }
 
 // --- Constants ---
@@ -38,12 +42,10 @@ const REDIS_KEYS = {
 class GNewsProvider {
   async fetch(query: string): Promise<NewsItem[]> {
     return keyManager.executeWithRetry('GNEWS', async (apiKey) => {
-      // GNews "topic" endpoint is better for categories than "q" search
       const url = `https://gnews.io/api/v4/top-headlines?lang=en&max=10&topic=${query}&apikey=${apiKey}`;
       const res = await fetch(url);
       
       if (!res.ok) {
-         // Handle rate limits specifically
          if (res.status === 429) throw new Error('Rate Limit Exceeded');
          throw new Error(`GNews ${res.status}: ${res.statusText}`);
       }
@@ -95,29 +97,20 @@ class NewsService {
 
   /**
    * 1. ATOMIC CYCLE MANAGEMENT
-   * Rotates through categories (Tech -> Business -> Politics) persistence.
    */
   private async getAndAdvanceCycleIndex(): Promise<number> {
     try {
-      // Atomic increment in Redis
       const newValue = await redis.incr(REDIS_KEYS.NEWS_CYCLE);
-      
-      // Safety reset to prevent huge numbers
-      if (newValue > 1000000) {
-        await redis.set(REDIS_KEYS.NEWS_CYCLE, '0');
-      }
-
-      // Modulo arithmetic to loop through the array safely
+      if (newValue > 1000000) await redis.set(REDIS_KEYS.NEWS_CYCLE, '0');
       return Math.abs((newValue - 1) % FETCH_CYCLES.length);
     } catch (e) {
       logger.warn(`Redis Cycle Error: ${e instanceof Error ? e.message : e}. Defaulting to 0.`);
-      return 0; // Fallback to first category if Redis fails
+      return 0; 
     }
   }
 
   /**
    * 2. MAIN FETCH ROUTINE
-   * Fetches -> Deduplicates (Redis) -> Returns Unique
    */
   async fetchLatest(): Promise<NewsItem[]> {
     const cycleIndex = await this.getAndAdvanceCycleIndex();
@@ -133,11 +126,7 @@ class NewsService {
       try {
         const res = await this.gnews.fetch(currentCycle.gnews);
         allArticles.push(...res);
-        
-        if (res.length < 2) {
-            logger.warn(`GNews returned low yield (${res.length}). Marking for fallback.`);
-            gnewsFailed = true;
-        }
+        if (res.length < 2) gnewsFailed = true;
       } catch (e) {
         logger.error(`GNews Strategy Failed: ${e instanceof Error ? e.message : 'Unknown'}`);
         await circuitBreaker.recordFailure('GNEWS');
@@ -146,7 +135,6 @@ class NewsService {
     }
 
     // B. Fallback Strategy: NewsAPI
-    // Trigger only if GNews failed OR yield was suspiciously low
     if ((allArticles.length < 5 || gnewsFailed) && await this.shouldTry('NEWS_API')) {
       logger.info('⚠️ Engaging NewsAPI fallback...');
       try {
@@ -158,20 +146,80 @@ class NewsService {
       }
     }
 
-    // C. Deduplication Pipeline
-    // Filter against Redis "Seen" Set to ensure we never process duplicates
-    const uniqueArticles = await this.filterSeenOrProcessing(allArticles);
+    // C. Deduplication (Redis Lock)
+    const uniqueFromRedis = await this.filterSeenOrProcessing(allArticles);
     
-    // D. Mark as Seen
-    // Lock these URLs for 48h so we don't fetch them again
-    await this.markAsSeenInRedis(uniqueArticles);
+    // D. Process, Save to DB, and Queue
+    // This is the new CRITICAL step that was missing
+    const savedArticles = await this.processAndSaveArticles(uniqueFromRedis);
 
-    logger.info(`✅ News Pipeline: ${uniqueArticles.length} unique articles ready for processing (from ${allArticles.length} raw).`);
-    
-    return uniqueArticles;
+    // E. Mark as Seen (Long Term)
+    await this.markAsSeenInRedis(savedArticles);
+
+    logger.info(`✅ Pipeline Complete: Saved & Queued ${savedArticles.length} new articles.`);
+    return savedArticles;
   }
 
-  // --- REDIS LOCKING HELPERS ---
+  // --- PROCESSING & SAVING (NEW) ---
+
+  private async processAndSaveArticles(articles: NewsItem[]): Promise<NewsItem[]> {
+    if (articles.length === 0) return [];
+
+    // 1. Database Check (Prisma)
+    // Filter out URLs that already exist in MongoDB
+    const urls = articles.map(a => a.url);
+    const existingDocs = await prisma.article.findMany({
+        where: { url: { in: urls } },
+        select: { url: true }
+    });
+    const existingSet = new Set(existingDocs.map(d => d.url));
+    const newToDb = articles.filter(a => !existingSet.has(a.url));
+
+    if (newToDb.length === 0) return [];
+
+    // 2. Logic Processing (Quality Score & Fuzzy Dedup)
+    const finalBatch = articleProcessor.processBatch(newToDb);
+
+    // 3. Save to Prisma & Add to Queue
+    const savedItems: NewsItem[] = [];
+
+    for (const item of finalBatch) {
+        try {
+            // Save initial record (Analysis will happen in Worker)
+            const saved = await prisma.article.create({
+                data: {
+                    headline: item.title,
+                    summary: item.description,
+                    url: item.url,
+                    source: item.source,
+                    category: item.category || 'General',
+                    publishedAt: item.publishedAt,
+                    imageUrl: item.imageUrl,
+                    politicalLean: 'Pending', // Will be updated by AI
+                    analysisType: 'Full',
+                    trustScore: 0,
+                    biasScore: 0
+                }
+            });
+
+            // Add to BullMQ for AI Processing
+            await newsQueue.add('analyze-article', {
+                articleId: saved.id, // Pass ID so worker can fetch & update
+                text: item.description + " " + (item.content || ""), // Pass text for AI
+                headline: item.title
+            });
+
+            savedItems.push(item);
+        } catch (e) {
+            logger.error(`Failed to save article ${item.title}: ${e}`);
+            // Continue loop - don't fail batch
+        }
+    }
+
+    return savedItems;
+  }
+
+  // --- REDIS HELPERS ---
 
   private async shouldTry(provider: string) {
     return !(await circuitBreaker.isOpen(provider));
@@ -182,26 +230,15 @@ class NewsService {
     return `${REDIS_KEYS.NEWS_SEEN_PREFIX}${hash}`;
   }
 
-  /**
-   * Filters out articles that are already in DB or currently being processed.
-   * Sets a temporary 3-minute "Processing Lock" on new articles.
-   */
   private async filterSeenOrProcessing(articles: NewsItem[]): Promise<NewsItem[]> {
     if (articles.length === 0) return [];
     
-    // Process checks in parallel
     const checks = articles.map(async (article) => {
         const key = this.getRedisKey(article.url);
         try {
-            // SET NX: Only set if Not Exists. 
-            // EX 180: Expire in 3 minutes (in case processing crashes, lock releases)
             const result = await redis.set(key, 'processing', 'EX', 180, 'NX');
-            
-            // If result is 'OK', we acquired the lock -> It's new.
             return result === 'OK' ? article : null;
         } catch (e) {
-            // Redis error? Fail open (process it) to be safe, or log and skip.
-            logger.error(`Redis Lock Error: ${e}`);
             return article; 
         }
     });
@@ -210,18 +247,12 @@ class NewsService {
     return results.filter((a): a is NewsItem => a !== null);
   }
 
-  /**
-   * Updates the lock to a long-term "Seen" status (48 hours).
-   * Call this AFTER successfully handing off to the queue/DB.
-   */
   private async markAsSeenInRedis(articles: NewsItem[]) {
       if (articles.length === 0) return;
-
       try {
           const pipeline = redis.pipeline();
           for (const article of articles) {
               const key = this.getRedisKey(article.url);
-              // Set to '1' with 48 hour expiry (172800 seconds)
               pipeline.set(key, '1', 'EX', 172800); 
           }
           await pipeline.exec();
