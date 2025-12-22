@@ -1,4 +1,4 @@
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/layout/AppLayout';
 import { HomePage } from './pages/HomePage';
 import { SearchPage } from './pages/SearchPage';
@@ -6,18 +6,25 @@ import { ProfilePage } from './pages/ProfilePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { NarrativePage } from './pages/NarrativePage';
 import { EmergencyPage } from './pages/EmergencyPage';
-import { useAuth } from './context/AuthContext'; // Assuming context exists
+import { LoginPage } from './pages/LoginPage';
+import { useAuth } from './context/AuthContext';
 import { Loader2 } from 'lucide-react';
 
-// Simple Auth Guard
+// Guard: Redirect to Login if not authenticated
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
   
-  if (loading) return <div className="h-screen w-full flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (loading) return <div className="h-screen w-full flex items-center justify-center"><Loader2 className="animate-spin text-primary" /></div>;
   
-  // For now, we allow access but might redirect to login if strictly required
-  // if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" replace />;
   
+  return children;
+}
+
+// Guard: Redirect to Profile if already logged in (for Login page)
+function PublicOnlyRoute({ children }: { children: JSX.Element }) {
+  const { user, loading } = useAuth();
+  if (!loading && user) return <Navigate to="/profile" replace />;
   return children;
 }
 
@@ -30,6 +37,13 @@ function App() {
         <Route path="/search" element={<SearchPage />} />
         <Route path="/narrative/:id" element={<NarrativePage />} />
         <Route path="/emergency" element={<EmergencyPage />} />
+        
+        {/* Auth Route */}
+        <Route path="/login" element={
+          <PublicOnlyRoute>
+            <LoginPage />
+          </PublicOnlyRoute>
+        } />
 
         {/* Protected Routes */}
         <Route path="/profile" element={
