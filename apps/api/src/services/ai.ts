@@ -1,4 +1,3 @@
-// apps/api/src/services/ai.ts
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { jsonrepair } from 'jsonrepair';
 import { config } from '../config';
@@ -6,10 +5,8 @@ import keyManager from '../utils/KeyManager';
 import circuitBreaker from '../utils/CircuitBreaker';
 import logger from '../utils/logger';
 import { BasicAnalysisSchema, FullAnalysisSchema, NarrativeSchema } from '../utils/validation';
-import { AppError } from '../utils/AppError';
 
 // Types
-type AIModelType = 'quality' | 'pro' | 'embedding';
 type AnalysisMode = 'Full' | 'Basic';
 
 const NEWS_SAFETY_SETTINGS = [
@@ -22,14 +19,25 @@ const NEWS_SAFETY_SETTINGS = [
 class AIService {
   
   /**
-   * Helper: Clean text to save tokens and improve accuracy
+   * Optimized Cleaner: Removes specific news junk to save tokens.
    */
   private optimizeText(text: string, isPro: boolean = false): string {
-    let clean = text.replace(/<[^>]*>/g, ' ') // Remove HTML
-                    .replace(/\s+/g, ' ').trim();
+    let clean = text.replace(/<[^>]*>/g, ' '); // HTML
     
-    // Limits: Flash (700k chars), Pro (1.5M chars) - Keeping it safe
-    const limit = isPro ? 1000000 : 500000;
+    // Remove common news clutter
+    const junkPhrases = [
+        "Subscribe to continue reading", "Read more", "Sign up for our newsletter",
+        "Follow us on", "© 2024", "All rights reserved", "Click here", 
+        "Advertisement", "Supported by"
+    ];
+    junkPhrases.forEach(phrase => {
+        clean = clean.replace(new RegExp(phrase, 'gi'), '');
+    });
+
+    clean = clean.replace(/\s+/g, ' ').trim();
+    
+    // Limits: Flash (700k chars), Pro (1.5M chars)
+    const limit = isPro ? 1000000 : 700000;
     if (clean.length > limit) {
       return clean.substring(0, limit) + "...(truncated)";
     }
@@ -40,25 +48,24 @@ class AIService {
    * Core Analysis Function
    */
   async analyzeArticle(text: string, headline: string, mode: AnalysisMode = 'Full') {
-    const isHealthy = await circuitBreaker.isOpen('GEMINI');
-    if (!isHealthy) return this.getFallbackAnalysis();
+    if (await circuitBreaker.isOpen('GEMINI')) return this.getFallbackAnalysis();
 
-    const modelName = config.aiModels.quality; // Flash model for speed/cost
+    const modelName = config.aiModels.quality; 
 
     try {
-      // 1. Construct Prompt
       const schemaJson = mode === 'Basic' ? JSON.stringify(BasicAnalysisSchema) : JSON.stringify(FullAnalysisSchema);
+      const cleanText = this.optimizeText(text);
+
       const prompt = `
         You are an expert news analyst. Analyze the following article.
         HEADLINE: ${headline}
-        TEXT: ${this.optimizeText(text)}
+        TEXT: ${cleanText}
         
         OUTPUT REQUIREMENT:
         Return ONLY valid JSON matching this schema:
         ${schemaJson}
       `;
 
-      // 2. Execute with Key Rotation & Retry
       const result = await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ 
@@ -71,7 +78,6 @@ class AIService {
         return response.response.text();
       });
 
-      // 3. Parse & Validate
       const cleanJson = jsonrepair(result);
       const parsed = JSON.parse(cleanJson);
       
@@ -80,8 +86,7 @@ class AIService {
 
     } catch (error: any) {
       logger.error(`AI Analysis Failed: ${error.message}`);
-      // Only record failure if it's not a validation error (i.e. if AI is down)
-      if (!error.issues) {
+      if (!error.issues) { // Only record failure if it's NOT a Zod validation error
         await circuitBreaker.recordFailure('GEMINI');
       }
       return this.getFallbackAnalysis();
@@ -89,7 +94,7 @@ class AIService {
   }
 
   /**
-   * Narrative Generation (Multi-doc synthesis)
+   * Narrative Generation
    */
   async generateNarrative(articles: { source: string, headline: string, summary: string }[]) {
     if (articles.length < 2) return null;
@@ -98,7 +103,6 @@ class AIService {
       const prompt = `
         Synthesize a Master Narrative from these ${articles.length} sources.
         Focus on consensus facts vs divergence/spin.
-        
         Sources:
         ${articles.map((a, i) => `[${i+1}] ${a.source}: ${a.headline} - ${a.summary}`).join('\n')}
       `;
@@ -106,7 +110,7 @@ class AIService {
       const result = await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ 
-          model: config.aiModels.pro, // Use Pro for reasoning
+          model: config.aiModels.pro, 
           generationConfig: { responseMimeType: "application/json" }
         });
         const res = await model.generateContent(prompt);
@@ -121,23 +125,55 @@ class AIService {
   }
 
   /**
-   * Generate Embeddings for Vector Search
+   * Single Embedding
    */
   async createEmbedding(text: string): Promise<number[] | null> {
     try {
-      const clean = this.optimizeText(text).substring(0, 9000); // Embedding limit
+      const clean = this.optimizeText(text).substring(0, 9000);
       
-      const embedding = await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
+      return await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ model: config.aiModels.embedding });
         const res = await model.embedContent(clean);
         return res.embedding.values;
       });
-      
-      return embedding;
     } catch (e) {
       logger.error('Embedding Failed', e);
       return null;
+    }
+  }
+
+  /**
+   * Batch Embedding (Restored Feature)
+   * Essential for bulk-processing articles for vector search.
+   */
+  async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
+    if (!texts.length) return [];
+    if (await circuitBreaker.isOpen('GEMINI')) return null;
+
+    try {
+        const BATCH_SIZE = 50; // Gemini limit per request is often 100, playing safe
+        const allEmbeddings: number[][] = [];
+
+        // Process in chunks
+        for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+             const chunk = texts.slice(i, i + BATCH_SIZE);
+             
+             // We can't use the standard SDK for batching easily in all versions, 
+             // but we can map parallel promises with concurrency control if needed.
+             // For simplicity and reliability in this stack, we'll map them:
+             const chunkPromises = chunk.map(text => this.createEmbedding(text));
+             const chunkResults = await Promise.all(chunkPromises);
+             
+             chunkResults.forEach(res => {
+                 if (res) allEmbeddings.push(res);
+                 else allEmbeddings.push([]); // Keep index alignment
+             });
+        }
+        return allEmbeddings;
+    } catch (error) {
+        logger.error('Batch Embedding Failed', error);
+        return null;
     }
   }
 
@@ -148,6 +184,7 @@ class AIService {
       sentiment: "Neutral",
       politicalLean: "Not Applicable",
       biasScore: 0,
+      trustScore: 0,
       trustLevel: "Unknown",
       keyFindings: []
     };
