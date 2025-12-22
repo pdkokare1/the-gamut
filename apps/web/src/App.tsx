@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/layout/AppLayout';
 import { HomePage } from './pages/HomePage';
 import { SearchPage } from './pages/SearchPage';
+import { ExplorePage } from './pages/ExplorePage'; // New Import
 import { ProfilePage } from './pages/ProfilePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { NarrativePage } from './pages/NarrativePage';
@@ -10,18 +11,14 @@ import { LoginPage } from './pages/LoginPage';
 import { useAuth } from './context/AuthContext';
 import { Loader2 } from 'lucide-react';
 
-// Guard: Redirect to Login if not authenticated
+// Guards (Same as before)
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
-  
   if (loading) return <div className="h-screen w-full flex items-center justify-center"><Loader2 className="animate-spin text-primary" /></div>;
-  
   if (!user) return <Navigate to="/login" replace />;
-  
   return children;
 }
 
-// Guard: Redirect to Profile if already logged in (for Login page)
 function PublicOnlyRoute({ children }: { children: JSX.Element }) {
   const { user, loading } = useAuth();
   if (!loading && user) return <Navigate to="/profile" replace />;
@@ -35,6 +32,7 @@ function App() {
         {/* Public Routes */}
         <Route path="/" element={<HomePage />} />
         <Route path="/search" element={<SearchPage />} />
+        <Route path="/explore" element={<ExplorePage />} /> {/* New Route */}
         <Route path="/narrative/:id" element={<NarrativePage />} />
         <Route path="/emergency" element={<EmergencyPage />} />
         
