@@ -1,78 +1,102 @@
-import { trpc } from "../utils/trpc";
-import { auth } from "../lib/firebase";
-import { Button } from "../components/ui/button";
-import { Card, CardHeader, CardTitle, CardContent } from "../components/ui/card";
-import { Switch } from "../components/ui/switch"; // Assumes you have a switch component or use checkbox
-import { Bell, Shield, LogOut, Trash2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input'; // Assuming standard Shadcn input
+import { Bell, Moon, Sun, Lock, LogOut, Trash2 } from 'lucide-react';
+import { toast } from 'sonner'; // Assuming we use sonner or similar toast, or standard alert
 
 export function SettingsPage() {
-  const navigate = useNavigate();
-  const { data: profile } = trpc.profile.getMe.useQuery();
-  
-  // Note: Actual mutation to update settings would go here
-  // const updateSettings = trpc.profile.updateSettings.useMutation();
+  const { user, logout, resetPassword } = useAuth();
+  const [notifications, setNotifications] = useState(true);
 
-  const handleLogout = async () => {
-    await auth.signOut();
-    navigate('/');
+  const handlePasswordReset = async () => {
+    if (user?.email) {
+      try {
+        await resetPassword(user.email);
+        toast.success("Password reset email sent!");
+      } catch (e) {
+        toast.error("Failed to send reset email.");
+      }
+    }
   };
 
-  if (!profile) return <div className="p-8 text-center">Please log in to manage settings.</div>;
-
   return (
-    <div className="container mx-auto max-w-xl p-4 space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900 mb-6">Settings</h1>
-
-      {/* Notifications */}
-      <Card>
-        <CardHeader className="pb-2">
-            <CardTitle className="flex items-center text-lg">
-                <Bell className="mr-2 h-5 w-5 text-indigo-500" /> Notifications
-            </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
-                <div>
-                    <p className="font-medium text-slate-900">Daily Briefing</p>
-                    <p className="text-sm text-slate-500">Get a morning summary of top stories.</p>
-                </div>
-                {/* Placeholder Switch - Logic to be connected to backend update */}
-                <div className="h-6 w-11 bg-slate-200 rounded-full relative cursor-pointer">
-                    <div className={`absolute left-1 top-1 h-4 w-4 rounded-full transition-all ${profile.notificationsEnabled ? 'bg-indigo-600 translate-x-5' : 'bg-slate-400'}`}></div>
-                </div>
-            </div>
-        </CardContent>
-      </Card>
-
-      {/* Account */}
-      <Card>
-        <CardHeader className="pb-2">
-            <CardTitle className="flex items-center text-lg">
-                <Shield className="mr-2 h-5 w-5 text-green-500" /> Account
-            </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-            <div className="p-3 bg-slate-50 rounded-md">
-                <p className="text-xs text-slate-500 uppercase font-bold mb-1">Email</p>
-                <p className="text-slate-900">{profile.email}</p>
-            </div>
-            
-            <Button variant="outline" className="w-full justify-start text-red-600 hover:text-red-700 hover:bg-red-50" onClick={handleLogout}>
-                <LogOut className="mr-2 h-4 w-4" /> Sign Out
-            </Button>
-            
-            <div className="pt-4 border-t">
-                <Button variant="ghost" className="w-full justify-start text-red-500 hover:text-red-700 text-xs">
-                    <Trash2 className="mr-2 h-3 w-3" /> Delete Account
-                </Button>
-            </div>
-        </CardContent>
-      </Card>
+    <div className="max-w-2xl mx-auto space-y-8 fade-in">
       
-      <div className="text-center text-xs text-slate-400">
-        App Version 2.5.0 (Gemini Build)
+      <div className="mb-6">
+        <h1 className="text-3xl font-logo font-bold">Settings</h1>
+        <p className="text-muted-foreground">Manage your preferences and account.</p>
       </div>
+
+      {/* 1. PREFERENCES */}
+      <section className="glass-card rounded-xl p-6 space-y-6">
+        <h2 className="font-semibold flex items-center gap-2">
+           <Bell className="h-4 w-4 text-primary" /> Preferences
+        </h2>
+        
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium">Push Notifications</p>
+            <p className="text-xs text-muted-foreground">Receive daily briefing alerts.</p>
+          </div>
+          {/* Simple Toggle Switch */}
+          <button 
+            onClick={() => setNotifications(!notifications)}
+            className={`w-11 h-6 flex items-center rounded-full transition-colors ${notifications ? 'bg-primary' : 'bg-muted'}`}
+          >
+            <span className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform ${notifications ? 'translate-x-6' : 'translate-x-1'}`} />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium">Theme</p>
+            <p className="text-xs text-muted-foreground">Dark mode is enabled by default.</p>
+          </div>
+          <div className="flex gap-2">
+             {/* Visual indicator only since theme is handled globally */}
+             <div className="p-2 bg-secondary rounded-md opacity-50"><Sun className="h-4 w-4" /></div>
+             <div className="p-2 bg-primary/20 text-primary rounded-md"><Moon className="h-4 w-4" /></div>
+          </div>
+        </div>
+      </section>
+
+      {/* 2. ACCOUNT */}
+      <section className="glass-card rounded-xl p-6 space-y-6">
+        <h2 className="font-semibold flex items-center gap-2">
+           <Lock className="h-4 w-4 text-primary" /> Account
+        </h2>
+        
+        <div className="space-y-2">
+          <label className="text-xs font-medium uppercase text-muted-foreground">Email Address</label>
+          <Input value={user?.email || ''} disabled className="bg-secondary/50" />
+        </div>
+
+        <div className="flex justify-between items-center pt-2">
+           <p className="text-sm text-muted-foreground">Want to change your password?</p>
+           <Button variant="outline" size="sm" onClick={handlePasswordReset}>
+             Send Reset Link
+           </Button>
+        </div>
+      </section>
+
+      {/* 3. DANGER ZONE */}
+      <section className="border border-destructive/20 bg-destructive/5 rounded-xl p-6 space-y-4">
+        <h2 className="font-semibold text-destructive flex items-center gap-2">
+           Danger Zone
+        </h2>
+        
+        <div className="flex justify-between items-center">
+          <Button variant="ghost" className="text-muted-foreground hover:text-foreground" onClick={logout}>
+            <LogOut className="h-4 w-4 mr-2" /> Sign Out
+          </Button>
+
+          <Button variant="destructive" size="sm">
+            <Trash2 className="h-4 w-4 mr-2" /> Delete Account
+          </Button>
+        </div>
+      </section>
+
     </div>
   );
 }
