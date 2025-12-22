@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { router, publicProcedure, protectedProcedure } from '../trpc';
 import { TRPCError } from '@trpc/server';
+import { searchService } from '../services/search'; // Import the new service
 
 export const articleRouter = router({
   // 1. Get the Main News Feed (Infinite Scroll)
@@ -20,13 +21,12 @@ export const articleRouter = router({
       const items = await ctx.prisma.article.findMany({
         take: limit + 1, // Fetch one extra to check if there is a next page
         cursor: cursor ? { id: cursor } : undefined,
-        orderBy: { publishedAt: 'desc' }, // Enforce recency, same as old backend
+        orderBy: { publishedAt: 'desc' }, // Enforce recency
         where: {
           ...(category && { category }),
           ...(sentiment && { sentiment }),
           ...(country && country !== 'Global' ? { country } : {}),
         },
-        // We select specific fields to keep the payload light, similar to the old endpoint
         select: {
           id: true,
           headline: true,
@@ -43,7 +43,7 @@ export const articleRouter = router({
 
       let nextCursor: typeof cursor | undefined = undefined;
       if (items.length > limit) {
-        const nextItem = items.pop(); // Remove the extra item
+        const nextItem = items.pop(); 
         nextCursor = nextItem!.id;
       }
 
@@ -53,7 +53,7 @@ export const articleRouter = router({
       };
     }),
 
-  // 2. Get Single Article by ID (With Analytics Restoration)
+  // 2. Get Single Article by ID (With Analytics)
   getById: publicProcedure
     .input(z.object({ id: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -68,12 +68,9 @@ export const articleRouter = router({
         });
       }
 
-      // --- RESTORED FUNCTIONALITY: Analytics & View Counts ---
-      // If the user is logged in, we must track this view
+      // Track Views (Fire-and-forget)
       if (ctx.user) {
-        // We run this asynchronously (fire-and-forget) so we don't slow down the UI
         Promise.all([
-          // 1. Increment User Stats
           ctx.prisma.profile.update({
             where: { userId: ctx.user.uid },
             data: { 
@@ -81,7 +78,6 @@ export const articleRouter = router({
               lastActiveDate: new Date(),
             },
           }),
-          // 2. Create Activity Log
           ctx.prisma.activityLog.create({
             data: {
               userId: ctx.user.uid,
@@ -90,36 +86,23 @@ export const articleRouter = router({
             }
           })
         ]).catch((err) => {
-          console.error("Failed to update analytics for article view:", err);
+          console.error("Failed to update analytics:", err);
         });
       }
 
       return article;
     }),
 
-  // 3. Search Articles (Improved Relevance)
+  // 3. Search Articles (Updated: Now uses Smart Search Service)
   search: publicProcedure
     .input(z.object({ term: z.string() }))
     .query(async ({ ctx, input }) => {
-      // We prioritize matches in the headline, then summary
-      // This mimics the "weights" in your old Mongoose Text Index
-      const results = await ctx.prisma.article.findMany({
-        where: {
-          OR: [
-            { headline: { contains: input.term, mode: 'insensitive' } },
-            { summary: { contains: input.term, mode: 'insensitive' } },
-            { clusterTopic: { contains: input.term, mode: 'insensitive' } }
-          ],
-        },
-        take: 20,
-        orderBy: { publishedAt: 'desc' },
-      });
-
-      return results;
+      // Delegates complex logic to the service
+      // Service handles Atlas Aggregation AND Fallback
+      return await searchService.search(input.term);
     }),
     
-  // 4. Get Related Articles (New: Missing in previous new setup)
-  // This simulates the "clustering" functionality
+  // 4. Get Related Articles
   getRelated: publicProcedure
     .input(z.object({ 
       clusterId: z.number().nullable().optional(),
@@ -128,7 +111,6 @@ export const articleRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       if (!input.clusterId) {
-        // Fallback: Same category
         return ctx.prisma.article.findMany({
           where: {
             category: input.category,
@@ -139,7 +121,6 @@ export const articleRouter = router({
         });
       }
 
-      // Priority: Same Cluster
       return ctx.prisma.article.findMany({
         where: {
           clusterId: input.clusterId,
