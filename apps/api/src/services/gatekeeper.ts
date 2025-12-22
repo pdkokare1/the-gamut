@@ -1,35 +1,45 @@
-export const gatekeeperService = {
-  // Blacklisted keywords that indicate low-quality or irrelevant content
-  blacklistedKeywords: [
-    'gossip', 'celeb', 'kardashian', 'horoscope', 'lottery', 
-    'coupon', 'deal of the day', 'click here', 'subscribe now',
-    'sex', 'porn', 'xxx', 'dating', 'casino'
-  ],
+// apps/api/src/services/gatekeeper.ts
+import logger from '../utils/logger';
 
-  // Blacklisted sources (if any specific domains are spammy)
-  blacklistedDomains: [
-    'tmz.com', 'perezhilton.com', 'dailymail.co.uk' // Example
-  ],
+class GatekeeperService {
+  private blockedDomains = [
+    'promotions.com', 'giveaway', 'coupons', 'deals', 'slickdeals', 
+    'marketwatch.com/press-release', 'prweb.com', 'businesswire.com'
+  ];
+
+  private blockedKeywords = [
+    'subscription', 'giveaway', 'sweepstakes', 'coupon', 
+    'deal of the day', 'limited time offer', 'act now', 
+    'press release', 'market research report'
+  ];
 
   /**
-   * Evaluates if an article is valid for the platform.
+   * Determines if an article is "Real News" or junk/spam.
    */
-  isValid(title: string, description: string, source: string): boolean {
-    const text = (title + ' ' + description).toLowerCase();
+  isValid(title: string, description: string, url: string): boolean {
+    const combinedText = (title + ' ' + description).toLowerCase();
+    const urlLower = url.toLowerCase();
 
-    // 1. Check for valid length
-    if (text.length < 50) return false; // Too short to be news
-
-    // 2. Check Blacklisted Sources
-    if (this.blacklistedDomains.some(d => source.toLowerCase().includes(d))) {
+    // 1. Domain Check
+    if (this.blockedDomains.some(d => urlLower.includes(d))) {
+      logger.info(`🛡️ Gatekeeper Blocked (Domain): ${url}`);
       return false;
     }
 
-    // 3. Check Blacklisted Keywords
-    if (this.blacklistedKeywords.some(w => text.includes(w))) {
+    // 2. Keyword Check (Spam/Ads)
+    if (this.blockedKeywords.some(k => combinedText.includes(k))) {
+      logger.info(`🛡️ Gatekeeper Blocked (Keyword): ${title.substring(0, 50)}...`);
+      return false;
+    }
+
+    // 3. Length Quality Check
+    if (title.split(' ').length < 4) {
+      // Titles with fewer than 4 words are rarely good news headlines
       return false;
     }
 
     return true;
   }
-};
+}
+
+export const gatekeeperService = new GatekeeperService();
