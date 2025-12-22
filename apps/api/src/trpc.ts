@@ -1,30 +1,98 @@
 import { initTRPC, TRPCError } from '@trpc/server';
-import { Context } from './context';
-import superjson from 'superjson'; // Allows sending Date/Map objects easily
+import { type Context } from './context';
+import superjson from 'superjson';
+import { ZodError } from 'zod';
 
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
-  errorFormatter({ shape }) {
-    return shape;
+  errorFormatter({ shape, error }) {
+    return {
+      ...shape,
+      data: {
+        ...shape.data,
+        zodError:
+          error.cause instanceof ZodError ? error.cause.flatten() : null,
+      },
+    };
   },
 });
 
-// 1. Public Procedure (Open to everyone)
-export const publicProcedure = t.procedure;
-
-// 2. Protected Procedure (Must be logged in)
-const isAuthed = t.middleware(({ ctx, next }) => {
-  if (!ctx.user) {
-    throw new TRPCError({ code: 'UNAUTHORIZED' });
+/**
+ * 1. Performance Logger
+ * Tracks how long each request takes.
+ */
+const loggerMiddleware = t.middleware(async ({ path, type, next }) => {
+  const start = Date.now();
+  const result = await next();
+  const durationMs = Date.now() - start;
+  
+  if (durationMs > 1000) {
+      console.warn(`[SLOW] ${path} took ${durationMs}ms`);
   }
-  return next({
-    ctx: {
-      user: ctx.user,
-    },
-  });
+  
+  return result;
 });
 
-export const protectedProcedure = t.procedure.use(isAuthed);
+/**
+ * 2. Activity Recorder
+ * Automatically logs key user actions to the database.
+ * Replaces old Mongoose Middleware.
+ */
+const activityMiddleware = t.middleware(async ({ ctx, path, next, rawInput }) => {
+  const result = await next();
 
-// 3. Router Builder
+  // Only log if user is authenticated and the call was successful
+  if (result.ok && ctx.user) {
+    try {
+      // Map procedure names to ActionTypes
+      let action: 'view_analysis' | 'view_comparison' | 'share_article' | null = null;
+      let articleId: string | undefined = undefined;
+
+      // Extract article ID from input if present
+      // @ts-ignore
+      if (rawInput && typeof rawInput === 'object' && 'id' in rawInput) {
+           // @ts-ignore
+           articleId = rawInput.id;
+      }
+
+      if (path === 'article.getById') action = 'view_analysis';
+      if (path === 'narrative.getClusterById') action = 'view_comparison';
+      // Add more mappings as needed
+
+      if (action) {
+        // Fire and forget (don't await) to keep response fast
+        ctx.prisma.activityLog.create({
+          data: {
+            userId: ctx.user.uid,
+            action,
+            articleId,
+            timestamp: new Date()
+          }
+        }).catch(err => console.error("Failed to log activity:", err));
+      }
+    } catch (e) {
+      // Ignore logging errors
+    }
+  }
+
+  return result;
+});
+
 export const router = t.router;
+export const publicProcedure = t.procedure.use(loggerMiddleware);
+
+// Protected procedures automatically log activity
+export const protectedProcedure = t.procedure
+  .use(loggerMiddleware)
+  .use(activityMiddleware)
+  .use(async ({ ctx, next }) => {
+    if (!ctx.user) {
+      throw new TRPCError({ code: 'UNAUTHORIZED' });
+    }
+    return next({
+      ctx: {
+        ...ctx,
+        user: ctx.user,
+      },
+    });
+  });
