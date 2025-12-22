@@ -12,78 +12,87 @@ interface ClusterInput {
 }
 
 class ClusteringService {
-  
-  /**
-   * Finds an existing cluster for a new article or creates a new ID.
-   */
-  async findClusterForArticle(article: ClusterInput): Promise<{ clusterId: number, clusterTopic: string }> {
-    const windowStart = new Date(article.publishedAt.getTime() - 24 * 60 * 60 * 1000); // 24 Hours back
 
-    // 1. Fetch candidates from DB (Same Category + Recent)
-    // Optimization: Only fetch fields needed for comparison
-    const candidates = await prisma.article.findMany({
+  /**
+   * Finds or Creates a Cluster ID for a new article.
+   */
+  async findClusterForArticle(article: ClusterInput): Promise<{ clusterId: number; clusterTopic: string }> {
+    const { primaryNoun, category, publishedAt } = article;
+    
+    // Default: No Cluster
+    let clusterId = Math.floor(Math.random() * 1000000); // Temporary ID
+    let clusterTopic = primaryNoun || "General News";
+
+    if (!primaryNoun) {
+      return { clusterId, clusterTopic };
+    }
+
+    // 1. Search for existing cluster (Last 24 hours)
+    const twentyFourHoursAgo = new Date(publishedAt.getTime() - (24 * 60 * 60 * 1000));
+
+    const match = await prisma.article.findFirst({
       where: {
-        category: article.category,
-        publishedAt: { gte: windowStart },
-        clusterId: { not: null } // Only look at clustered articles
+        publishedAt: { gte: twentyFourHoursAgo },
+        category: category,
+        primaryNoun: primaryNoun,
+        clusterId: { not: null }
       },
-      select: {
-        id: true,
-        headline: true,
-        clusterId: true,
-        clusterTopic: true
-      },
-      take: 50 // Limit to avoid performance hits
+      orderBy: { publishedAt: 'desc' }
     });
 
-    // 2. Fuzzy Match Logic
-    let bestMatchId: number | null = null;
-    let bestMatchTopic: string | null = null;
-    let highestSimilarity = 0;
-
-    for (const candidate of candidates) {
-      const similarity = this.calculateSimilarity(article.title, candidate.headline);
+    if (match && match.clusterId) {
+      // ✅ Attach to existing cluster
+      logger.info(`🔗 Clustering: "${article.title}" -> Joined Cluster ${match.clusterId} (${match.clusterTopic})`);
       
-      // Threshold: 0.6 (60% similar words)
-      if (similarity > 0.6 && similarity > highestSimilarity) {
-        highestSimilarity = similarity;
-        bestMatchId = candidate.clusterId;
-        bestMatchTopic = candidate.clusterTopic;
-      }
+      await this.updateNarrativeStats(match.clusterId, article.source);
+      
+      return { 
+        clusterId: match.clusterId, 
+        clusterTopic: match.clusterTopic || clusterTopic 
+      };
     }
 
-    // 3. Return Existing Cluster
-    if (bestMatchId && bestMatchTopic) {
-      return { clusterId: bestMatchId, clusterTopic: bestMatchTopic };
-    }
+    // 🆕 Create New Cluster Entry
+    logger.info(`🆕 Clustering: "${article.title}" -> Started New Cluster ${clusterId}`);
+    
+    await this.createNarrativeEntry(clusterId, article);
 
-    // 4. Create New Cluster
-    // In a real system, you might use Redis for an atomic counter, 
-    // but here we generate a timestamp-based ID for simplicity/uniqueness.
-    const newClusterId = Math.floor(Date.now() / 1000);
-    return { clusterId: newClusterId, clusterTopic: article.title };
+    return { clusterId, clusterTopic };
   }
 
-  // --- Helpers ---
+  private async updateNarrativeStats(clusterId: number, newSource: string) {
+    try {
+      await prisma.narrative.update({
+        where: { clusterId },
+        data: {
+          lastUpdated: new Date(),
+          sourceCount: { increment: 1 },
+          sources: { push: newSource }
+        }
+      });
+    } catch (e) {
+      // Narrative might not exist yet if race condition, ignore
+    }
+  }
 
-  /**
-   * Simple Jaccard Similarity (Word Overlap)
-   * Fast & "Good Enough" for initial grouping without AI.
-   */
-  private calculateSimilarity(s1: string, s2: string): number {
-    const set1 = new Set(s1.toLowerCase().split(/\s+/));
-    const set2 = new Set(s2.toLowerCase().split(/\s+/));
-    
-    // Intersection
-    let intersection = 0;
-    set1.forEach(word => {
-        if (word.length > 3 && set2.has(word)) intersection++;
-    });
-
-    // Union
-    const union = new Set([...set1, ...set2]).size;
-    
-    return intersection / union;
+  private async createNarrativeEntry(clusterId: number, article: ClusterInput) {
+    try {
+      await prisma.narrative.create({
+        data: {
+          clusterId,
+          masterHeadline: article.title,
+          executiveSummary: article.summary,
+          category: article.category,
+          country: "Global",
+          sourceCount: 1,
+          sources: [article.source],
+          consensusPoints: [], // Will be filled by AI Narrative Job later
+          lastUpdated: new Date()
+        }
+      });
+    } catch (e) {
+      logger.error('Failed to create narrative entry', e);
+    }
   }
 }
 
