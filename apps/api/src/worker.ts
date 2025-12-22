@@ -1,27 +1,32 @@
+// apps/api/src/worker.ts
 import { Worker } from 'bullmq';
-import { config, redis } from './config';
-import { processNewsJob } from './jobs/processor';
-
-const WORKER_NAME = 'news-worker';
+import { config } from './config';
+import { QUEUE_NAME } from './jobs/queue';
+import { jobProcessor } from './jobs/processor';
 
 console.log('👷 Worker Service Starting...');
 
-const worker = new Worker(WORKER_NAME, processNewsJob, {
-  connection: redis,
-  concurrency: 1, // Process one job at a time to respect API rate limits
+// Initialize Worker
+// It listens to the same queue name as the scheduler
+const worker = new Worker(QUEUE_NAME, jobProcessor, {
+  connection: config.redis,
+  concurrency: 5, // We can now process 5 articles in parallel!
 });
 
 worker.on('completed', (job) => {
-  console.log(`Job ${job.id} completed!`);
+  console.log(`✅ Job ${job.id} (${job.name}) completed!`);
 });
 
 worker.on('failed', (job, err) => {
-  console.error(`Job ${job?.id} failed:`, err);
+  console.error(`❌ Job ${job?.id} (${job?.name}) failed:`, err);
 });
 
 // Graceful Shutdown
-process.on('SIGTERM', async () => {
+const gracefulShutdown = async () => {
   console.log('Worker shutting down...');
   await worker.close();
   process.exit(0);
-});
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
