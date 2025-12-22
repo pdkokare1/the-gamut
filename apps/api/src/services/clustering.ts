@@ -1,73 +1,99 @@
 // apps/api/src/services/clustering.ts
 import { prisma } from '@gamut/db';
 import logger from '../utils/logger';
-import redisHelper from '../utils/redis';
 
-// Logic:
-// 1. Vector Search for semantic similarity.
-// 2. Time-based window (last 24-48h).
-// 3. If match found -> assign same ClusterID.
-// 4. If no match -> assign new ClusterID.
+interface ClusterInput {
+  title: string;
+  summary: string;
+  category: string;
+  source: string;
+  primaryNoun?: string;
+  publishedAt: Date;
+}
 
-export const clusteringService = {
-  
-  async findClusterForArticle(embedding: number[], country: string = "Global"): Promise<{ clusterId: number; topic: string } | null> {
-    if (!embedding || embedding.length === 0) return null;
+class ClusteringService {
 
-    try {
-      // Execute Raw Aggregation for Vector Search
-      // Prisma doesn't strictly type raw commands, so we cast result
-      const result = await prisma.$runCommandRaw({
-        aggregate: "Article",
-        pipeline: [
-          {
-            "$vectorSearch": {
-              "index": "vector_index",
-              "path": "embedding",
-              "queryVector": embedding,
-              "numCandidates": 50,
-              "limit": 1,
-              "filter": {
-                "country": { "$eq": country }
-              }
-            }
-          },
-          {
-            "$project": {
-              "clusterId": 1,
-              "clusterTopic": 1,
-              "score": { "$meta": "vectorSearchScore" }
-            }
-          }
-        ],
-        cursor: {}
-      }) as any;
+  /**
+   * Finds or Creates a Cluster ID for a new article.
+   */
+  async findClusterForArticle(article: ClusterInput): Promise<{ clusterId: number; clusterTopic: string }> {
+    const { primaryNoun, category, publishedAt } = article;
+    
+    // Default: No Cluster
+    let clusterId = Math.floor(Math.random() * 1000000); // Temporary ID
+    let clusterTopic = primaryNoun || "General News";
 
-      // Parse result (MongoDB returns { cursor: { firstBatch: [...] } })
-      const matches = result.cursor?.firstBatch || [];
-      const bestMatch = matches[0];
-
-      // Threshold: 0.85 similarity implies same story
-      if (bestMatch && bestMatch.score > 0.85) {
-        return {
-          clusterId: bestMatch.clusterId,
-          topic: bestMatch.clusterTopic
-        };
-      }
-
-    } catch (error: any) {
-      logger.warn(`Vector Search Error: ${error.message}`);
+    if (!primaryNoun) {
+      return { clusterId, clusterTopic };
     }
 
-    return null;
-  },
+    // 1. Search for existing cluster (Last 24 hours)
+    const twentyFourHoursAgo = new Date(publishedAt.getTime() - (24 * 60 * 60 * 1000));
 
-  async getNewClusterId(): Promise<number> {
-    // Generate simple ID based on time + random to avoid collision
-    // In production, Redis INCR is better, falling back to timestamp
-    if (redisHelper.isReady()) {
-      return await redisHelper.incr('GLOBAL_CLUSTER_ID');
+    const match = await prisma.article.findFirst({
+      where: {
+        publishedAt: { gte: twentyFourHoursAgo },
+        category: category,
+        primaryNoun: primaryNoun,
+        clusterId: { not: null }
+      },
+      orderBy: { publishedAt: 'desc' }
+    });
+
+    if (match && match.clusterId) {
+      // ✅ Attach to existing cluster
+      logger.info(`🔗 Clustering: "${article.title}" -> Joined Cluster ${match.clusterId} (${match.clusterTopic})`);
+      
+      await this.updateNarrativeStats(match.clusterId, article.source);
+      
+      return { 
+        clusterId: match.clusterId, 
+        clusterTopic: match.clusterTopic || clusterTopic 
+      };
     }
-    return Math.floor(Date.now() / 1000);
+
+    // 🆕 Create New Cluster Entry
+    logger.info(`🆕 Clustering: "${article.title}" -> Started New Cluster ${clusterId}`);
+    
+    await this.createNarrativeEntry(clusterId, article);
+
+    return { clusterId, clusterTopic };
   }
-};
+
+  private async updateNarrativeStats(clusterId: number, newSource: string) {
+    try {
+      await prisma.narrative.update({
+        where: { clusterId },
+        data: {
+          lastUpdated: new Date(),
+          sourceCount: { increment: 1 },
+          sources: { push: newSource }
+        }
+      });
+    } catch (e) {
+      // Narrative might not exist yet if race condition, ignore
+    }
+  }
+
+  private async createNarrativeEntry(clusterId: number, article: ClusterInput) {
+    try {
+      await prisma.narrative.create({
+        data: {
+          clusterId,
+          masterHeadline: article.title,
+          executiveSummary: article.summary,
+          category: article.category,
+          country: "Global",
+          sourceCount: 1,
+          sources: [article.source],
+          consensusPoints: [], // Will be filled by AI Narrative Job later
+          lastUpdated: new Date()
+        }
+      });
+    } catch (e) {
+      logger.error('Failed to create narrative entry', e);
+    }
+  }
+}
+
+export const clusteringService = new ClusteringService();
