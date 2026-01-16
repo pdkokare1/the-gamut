@@ -1,32 +1,52 @@
 import { z } from 'zod';
 import { router, protectedProcedure, publicProcedure } from '../trpc';
 import { TRPCError } from '@trpc/server';
+import { gamificationService } from '../services/gamification';
 
 export const profileRouter = router({
-  // 1. GET CURRENT PROFILE
-  // Replaces: GET /api/profile/me
+  // 1. GET CURRENT PROFILE (Enriched with Gamification & Stats)
   getMe: protectedProcedure.query(async ({ ctx }) => {
-    const profile = await ctx.prisma.profile.findUnique({
+    let profile = await ctx.prisma.profile.findUnique({
       where: { userId: ctx.user.uid },
     });
 
     if (!profile) {
-      // Auto-create profile if it doesn't exist (First time login)
-      // This handles the "Sign Up" flow seamlessly
-      return ctx.prisma.profile.create({
+      // Auto-create for new users
+      profile = await ctx.prisma.profile.create({
         data: {
           userId: ctx.user.uid,
           email: ctx.user.email || '',
           username: ctx.user.email?.split('@')[0] || `user_${Date.now()}`,
+          // Initialize stats
+          leanExposure: { Left: 0, Center: 0, Right: 0 },
+          topicInterest: {},
+          badges: []
         },
       });
     }
 
-    return profile;
+    // Trigger streak check on load (passive check)
+    // We don't await this to keep the UI snappy
+    gamificationService.updateStreak(ctx.user.uid).catch(console.error);
+
+    // Transform data to match Frontend Expectations
+    return {
+      ...profile,
+      stats: {
+        articlesViewed: profile.articlesViewedCount,
+        totalTimeSpent: profile.totalTimeSpent,
+        leanExposure: profile.leanExposure as Record<string, number>,
+        topicInterest: profile.topicInterest as Record<string, number>,
+      },
+      gamification: {
+        streak: profile.currentStreak,
+        badges: profile.badges || [],
+        level: Math.floor(profile.articlesViewedCount / 10) + 1
+      }
+    };
   }),
 
-  // 2. UPDATE PROFILE
-  // Replaces: PUT /api/profile/update
+  // 2. UPDATE BASIC PROFILE
   update: protectedProcedure
     .input(
       z.object({
@@ -36,16 +56,12 @@ export const profileRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      // Check uniqueness if updating username
       if (input.username) {
         const existing = await ctx.prisma.profile.findUnique({
           where: { username: input.username },
         });
         if (existing && existing.userId !== ctx.user.uid) {
-          throw new TRPCError({
-            code: 'CONFLICT',
-            message: 'Username already taken',
-          });
+          throw new TRPCError({ code: 'CONFLICT', message: 'Username already taken' });
         }
       }
 
@@ -55,12 +71,63 @@ export const profileRouter = router({
       });
     }),
 
-  // 3. TOGGLE SAVED ARTICLE
-  // Replaces: POST /api/profile/save and DELETE /api/profile/save
+  // 3. TRACK ACTIVITY (Heartbeat for Echo Chamber & Time)
+  // Replaces logic from userStatsModel
+  trackActivity: protectedProcedure
+    .input(z.object({
+      articleId: z.string().optional(),
+      timeSpentSeconds: z.number().min(1),
+      politicalLean: z.enum(['Left', 'Center', 'Right']).optional(),
+      topic: z.string().optional()
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const { timeSpentSeconds, politicalLean, topic } = input;
+      
+      // 1. Fetch current stats
+      const profile = await ctx.prisma.profile.findUnique({
+        where: { userId: ctx.user.uid },
+        select: { leanExposure: true, topicInterest: true }
+      });
+      
+      if (!profile) return;
+
+      // 2. Prepare Updates
+      const currentLean = (profile.leanExposure as any) || { Left: 0, Center: 0, Right: 0 };
+      const currentTopics = (profile.topicInterest as any) || {};
+
+      // Update Lean Exposure
+      if (politicalLean) {
+        currentLean[politicalLean] = (currentLean[politicalLean] || 0) + (timeSpentSeconds / 60); // Store in minutes
+      }
+
+      // Update Topic Interest
+      if (topic) {
+        currentTopics[topic] = (currentTopics[topic] || 0) + (timeSpentSeconds / 60);
+      }
+
+      // 3. Save to DB
+      await ctx.prisma.profile.update({
+        where: { userId: ctx.user.uid },
+        data: {
+            totalTimeSpent: { increment: timeSpentSeconds },
+            leanExposure: currentLean,
+            topicInterest: currentTopics,
+            articlesViewedCount: input.articleId ? { increment: 1 } : undefined // Only increment count if articleId provided (on open)
+        }
+      });
+
+      // 4. Check Badges
+      if (input.articleId) {
+          await gamificationService.checkReadBadges(ctx.user.uid);
+      }
+      
+      return { success: true };
+    }),
+
+  // 4. TOGGLE SAVED ARTICLE
   toggleSave: protectedProcedure
     .input(z.object({ articleId: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      // First, check if it's currently saved
       const profile = await ctx.prisma.profile.findUnique({
         where: { userId: ctx.user.uid },
         select: { savedArticleIds: true },
@@ -70,21 +137,19 @@ export const profileRouter = router({
 
       const isSaved = profile.savedArticleIds.includes(input.articleId);
 
-      // Perform the update
       await ctx.prisma.profile.update({
         where: { userId: ctx.user.uid },
         data: {
           savedArticles: isSaved
-            ? { disconnect: { id: input.articleId } } // Remove if saved
-            : { connect: { id: input.articleId } },   // Add if not saved
+            ? { disconnect: { id: input.articleId } }
+            : { connect: { id: input.articleId } },
         },
       });
 
       return { isSaved: !isSaved };
     }),
 
-  // 4. GET SAVED ARTICLES
-  // Replaces: GET /api/profile/saved
+  // 5. GET SAVED ARTICLES
   getSavedArticles: protectedProcedure.query(async ({ ctx }) => {
     const profile = await ctx.prisma.profile.findUnique({
       where: { userId: ctx.user.uid },
@@ -107,9 +172,8 @@ export const profileRouter = router({
 
     return profile?.savedArticles || [];
   }),
-  
-  // 5. CHECK USERNAME (Public)
-  // Used during onboarding to show "Username available" green checkmark
+
+  // 6. CHECK USERNAME (Public)
   checkUsername: publicProcedure
     .input(z.object({ username: z.string() }))
     .query(async ({ ctx, input }) => {
