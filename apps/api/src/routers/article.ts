@@ -4,7 +4,7 @@ import { TRPCError } from '@trpc/server';
 import { searchService } from '../services/search';
 
 export const articleRouter = router({
-  // --- 1. Main Feed (Infinite Scroll with Full Filters) ---
+  // --- 1. Main Feed ---
   getFeed: publicProcedure
     .input(
       z.object({
@@ -13,11 +13,10 @@ export const articleRouter = router({
         category: z.string().optional(),
         sentiment: z.enum(['Positive', 'Negative', 'Neutral']).optional(),
         country: z.string().optional(),
-        // Ported Filters
         politicalLean: z.enum(['Left', 'Center', 'Right']).optional(),
         source: z.string().optional(),
         minTrustScore: z.number().min(0).max(100).optional(),
-        topic: z.string().optional(), // For InFocus/Topic specific feeds
+        topic: z.string().optional(),
       })
     )
     .query(async ({ ctx, input }) => {
@@ -43,20 +42,6 @@ export const articleRouter = router({
         cursor: cursor ? { id: cursor } : undefined,
         orderBy: { publishedAt: 'desc' },
         where: whereClause,
-        select: {
-          id: true,
-          headline: true,
-          summary: true,
-          source: true,
-          publishedAt: true,
-          imageUrl: true,
-          category: true,
-          sentiment: true,
-          biasScore: true,
-          trustScore: true,
-          politicalLean: true,
-          audioUrl: true,
-        }
       });
 
       let nextCursor: typeof cursor | undefined = undefined;
@@ -68,10 +53,9 @@ export const articleRouter = router({
       return { items, nextCursor };
     }),
 
-  // --- 2. Balanced Feed (Anti-Echo Chamber) ---
-  // Fetches equal parts Left, Center, and Right content
+  // --- 2. Balanced Feed ---
   getBalancedFeed: publicProcedure
-    .input(z.object({ limit: z.number().default(5) })) // Limit per lean (total = 3x limit)
+    .input(z.object({ limit: z.number().default(5) }))
     .query(async ({ ctx, input }) => {
       const [left, center, right] = await Promise.all([
         ctx.prisma.article.findMany({
@@ -91,7 +75,6 @@ export const articleRouter = router({
         })
       ]);
 
-      // Interleave results for a mixed view
       const mixed = [];
       const maxLength = Math.max(left.length, center.length, right.length);
       for (let i = 0; i < maxLength; i++) {
@@ -99,20 +82,57 @@ export const articleRouter = router({
         if (left[i]) mixed.push(left[i]);
         if (right[i]) mixed.push(right[i]);
       }
-
       return mixed;
     }),
 
-  // --- 3. Trending Topics ---
+  // --- 3. Topic Perspectives (Compare Coverage) ---
+  // Finds articles on the same topic from different viewpoints
+  getTopicPerspectives: publicProcedure
+    .input(z.object({ 
+      topic: z.string().nullable().optional(),
+      category: z.string().optional(),
+      currentArticleId: z.string() 
+    }))
+    .query(async ({ ctx, input }) => {
+      // Base criteria: Must be recently published
+      const timeLimit = new Date();
+      timeLimit.setDate(timeLimit.getDate() - 3); // Last 3 days
+
+      const baseWhere = {
+        id: { not: input.currentArticleId },
+        publishedAt: { gte: timeLimit }
+      };
+
+      // Strategy 1: Match by Cluster Topic (Best)
+      // Strategy 2: Match by Category (Fallback)
+      const topicFilter = input.topic ? { clusterTopic: input.topic } : { category: input.category };
+
+      const [left, center, right] = await Promise.all([
+        ctx.prisma.article.findFirst({
+            where: { ...baseWhere, ...topicFilter, politicalLean: 'Left' },
+            orderBy: { trustScore: 'desc' }
+        }),
+        ctx.prisma.article.findFirst({
+            where: { ...baseWhere, ...topicFilter, politicalLean: 'Center' },
+            orderBy: { trustScore: 'desc' }
+        }),
+        ctx.prisma.article.findFirst({
+            where: { ...baseWhere, ...topicFilter, politicalLean: 'Right' },
+            orderBy: { trustScore: 'desc' }
+        })
+      ]);
+
+      return { left, center, right };
+    }),
+
+  // --- 4. Trending Topics ---
   getTrendingTopics: publicProcedure
     .query(async ({ ctx }) => {
-      // Group by clusterTopic to find hot stories
-      // Note: This is an expensive aggregation, ideally cached
       const topics = await ctx.prisma.article.groupBy({
         by: ['clusterTopic'],
         _count: { clusterTopic: true },
         where: { 
-          publishedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }, // Last 24h
+          publishedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
           clusterTopic: { not: null }
         },
         orderBy: { _count: { clusterTopic: 'desc' } },
@@ -121,7 +141,7 @@ export const articleRouter = router({
       return topics.map(t => ({ topic: t.clusterTopic, count: t._count.clusterTopic }));
     }),
 
-  // --- 4. Single Article Analysis ---
+  // --- 5. Single Article ---
   getById: publicProcedure
     .input(z.object({ id: z.string() }))
     .query(async ({ ctx, input }) => {
@@ -129,82 +149,50 @@ export const articleRouter = router({
         where: { id: input.id },
       });
 
-      if (!article) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Article not found' });
-      }
+      if (!article) throw new TRPCError({ code: 'NOT_FOUND' });
 
-      // Fire-and-forget analytics
+      // Analytics
       if (ctx.user) {
         ctx.prisma.profile.update({
             where: { userId: ctx.user.uid },
             data: { articlesViewedCount: { increment: 1 }, lastActiveDate: new Date() }
-        }).catch(() => {}); // Ignore error
+        }).catch(() => {});
       }
-
       return article;
     }),
 
-  // --- 5. Smart Briefing (AI Summary) ---
+  // --- 6. Smart Briefing ---
   getSmartBriefing: publicProcedure
     .input(z.object({ articleId: z.string() }))
     .query(async ({ ctx, input }) => {
       const article = await ctx.prisma.article.findUnique({
-        where: { id: input.articleId },
-        select: {
-          headline: true,
-          summary: true,
-          keyFindings: true,
-          recommendations: true,
-          trustScore: true,
-          politicalLean: true,
-          source: true
-        }
+        where: { id: input.articleId }
       });
 
-      if (!article) throw new TRPCError({ code: 'NOT_FOUND', message: 'Article not found' });
+      if (!article) throw new TRPCError({ code: 'NOT_FOUND' });
 
       return {
         title: article.headline,
         content: article.summary,
-        keyPoints: article.keyFindings.length > 0 ? article.keyFindings : ["Analysis in progress."],
-        recommendations: article.recommendations.length > 0 ? article.recommendations : ["Compare sources."],
+        keyPoints: article.keyFindings,
+        recommendations: article.recommendations,
         meta: {
           trustScore: article.trustScore,
           politicalLean: article.politicalLean,
-          source: article.source
+          source: article.source,
+          sentiment: article.sentiment
         }
       };
     }),
 
-  // --- 6. Search ---
+  // --- 7. Search ---
   search: publicProcedure
     .input(z.object({ term: z.string() }))
     .query(async ({ input }) => {
       return await searchService.search(input.term);
     }),
 
-  // --- 7. Related Articles ---
-  getRelated: publicProcedure
-    .input(z.object({ 
-      clusterId: z.number().nullable().optional(),
-      category: z.string(),
-      currentArticleId: z.string() 
-    }))
-    .query(async ({ ctx, input }) => {
-      return ctx.prisma.article.findMany({
-        where: {
-          OR: [
-             { clusterId: input.clusterId ? input.clusterId : undefined },
-             { category: input.category }
-          ],
-          id: { not: input.currentArticleId }
-        },
-        take: 5,
-        orderBy: { publishedAt: 'desc' }
-      });
-    }),
-
-  // --- 8. Saved Articles (Protected) ---
+  // --- 8. User Actions (Save) ---
   getSaved: protectedProcedure
     .query(async ({ ctx }) => {
       const profile = await ctx.prisma.profile.findUnique({
@@ -214,7 +202,6 @@ export const articleRouter = router({
       return profile?.savedArticles || [];
     }),
 
-  // --- 9. Toggle Save (Protected Mutation) ---
   toggleSave: protectedProcedure
     .input(z.object({ articleId: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -223,26 +210,18 @@ export const articleRouter = router({
         select: { savedArticleIds: true }
       });
 
-      if (!profile) throw new TRPCError({ code: 'NOT_FOUND', message: 'Profile not found' });
+      if (!profile) throw new TRPCError({ code: 'NOT_FOUND' });
 
       const isSaved = profile.savedArticleIds.includes(input.articleId);
-
-      // Prisma connect/disconnect logic for arrays of IDs (MongoDB specific) or Relations
-      const updateData = isSaved 
-        ? { disconnect: { id: input.articleId } } 
-        : { connect: { id: input.articleId } };
 
       const updatedProfile = await ctx.prisma.profile.update({
         where: { userId: ctx.user.uid },
         data: {
-          savedArticles: updateData
+          savedArticles: isSaved ? { disconnect: { id: input.articleId } } : { connect: { id: input.articleId } }
         },
-        include: { savedArticles: true } // Return updated list
+        include: { savedArticles: true }
       });
 
-      return {
-        isSaved: !isSaved,
-        savedArticles: updatedProfile.savedArticles
-      };
+      return { isSaved: !isSaved, savedArticles: updatedProfile.savedArticles };
     })
 });
