@@ -1,22 +1,23 @@
-// apps/web/src/components/NewsFeed.tsx
-
 import { useState, useRef, useEffect } from 'react';
 import { useInView } from 'react-intersection-observer';
 import { trpc } from '../utils/trpc';
 import { useHaptic } from '../hooks/use-haptic';
 import { cn } from '../lib/utils';
-import { ArticleCard } from './ArticleCard'; // Ensure you have this component
-import { Loader2, RefreshCcw, WifiOff } from 'lucide-react';
+import { ArticleCard } from './ArticleCard';
+import { Loader2, RefreshCcw, WifiOff, Lock } from 'lucide-react';
 import { Button } from './ui/button';
-import { useMediaQuery } from '../hooks/use-pwa-install'; // Assuming you have a media query hook, or use standard CSS media queries
+import { useAuth } from '../context/AuthContext';
+// import { LoginModal } from './modals/LoginModal'; // Ensure this exists in your new structure
 
 // Types
-type FeedMode = 'latest' | 'balanced' | 'foryou';
+type FeedMode = 'latest' | 'infocus' | 'balanced';
 
 export function NewsFeed() {
   const [mode, setMode] = useState<FeedMode>('latest');
-  const [isSwiping, setIsSwiping] = useState(false);
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  
   const vibrate = useHaptic();
+  const { user, isGuest } = useAuth(); // Assuming useAuth provides user/isGuest
   
   // Swipe References
   const touchStart = useRef<number | null>(null);
@@ -24,49 +25,73 @@ export function NewsFeed() {
   const minSwipeDistance = 50;
 
   // --- 1. DATA FETCHING ---
-  // We map the 'mode' to specific filters for the backend
   const getFilterForMode = (m: FeedMode) => {
     switch (m) {
-      case 'balanced': return { sentiment: 'Neutral' as const };
-      case 'foryou': return { country: 'USA' }; // Placeholder for personalization logic
-      default: return {};
+      case 'balanced': 
+        // Balanced feed is handled by a separate endpoint in the Router, 
+        // but if we use the unified getFeed, we might need specific params.
+        // However, we added getBalancedFeed to the router.
+        // We will switch the query based on mode below.
+        return {}; 
+      case 'infocus': 
+        // 'InFocus' usually implies Narratives or specific clusters.
+        // We can use a filter or a different router call.
+        return { category: 'Narratives' }; 
+      default: 
+        return {};
     }
   };
 
-  const {
-    data,
-    isLoading,
-    isError,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-    refetch,
-    isRefetching
-  } = trpc.article.getFeed.useInfiniteQuery(
+  // We use the standard feed for Latest & InFocus
+  const mainFeedQuery = trpc.article.getFeed.useInfiniteQuery(
     { 
       limit: 10,
       ...getFilterForMode(mode)
     },
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: mode !== 'balanced', // Disable this query for balanced mode
       refetchOnWindowFocus: false,
-      // When mode changes, we want fresh data immediately
     }
   );
 
-  // --- 2. INFINITE SCROLL ---
+  // We use the specific balanced feed endpoint for Balanced mode
+  // Note: Infinite scroll might be different for Balanced if it returns a fixed set
+  const balancedFeedQuery = trpc.article.getBalancedFeed.useQuery(
+    { limit: 5 },
+    { enabled: mode === 'balanced' }
+  );
+
+  // Normalize data access
+  const articles = mode === 'balanced' 
+    ? (balancedFeedQuery.data || []) 
+    : (mainFeedQuery.data?.pages.flatMap((page) => page.items) || []);
+
+  const isLoading = mode === 'balanced' ? balancedFeedQuery.isLoading : mainFeedQuery.isLoading;
+  const isError = mode === 'balanced' ? balancedFeedQuery.isError : mainFeedQuery.isError;
+  const isRefetching = mode === 'balanced' ? balancedFeedQuery.isRefetching : mainFeedQuery.isRefetching;
+  const refetch = mode === 'balanced' ? balancedFeedQuery.refetch : mainFeedQuery.refetch;
+
+  // --- 2. INFINITE SCROLL (Only for Main Feed) ---
   const { ref, inView } = useInView();
   useEffect(() => {
-    if (inView && hasNextPage) {
-      fetchNextPage();
+    if (inView && mode !== 'balanced' && mainFeedQuery.hasNextPage) {
+      mainFeedQuery.fetchNextPage();
     }
-  }, [inView, hasNextPage, fetchNextPage]);
+  }, [inView, mode, mainFeedQuery]);
 
   // --- 3. INTERACTION HANDLERS ---
 
   const handleModeChange = (newMode: FeedMode) => {
     if (mode === newMode) return;
     vibrate();
+
+    // Guest Protection for Balanced Mode
+    if (newMode === 'balanced' && (!user || isGuest)) {
+        setShowLoginModal(true);
+        return;
+    }
+
     setMode(newMode);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -87,18 +112,14 @@ export function NewsFeed() {
     const isRightSwipe = distance < -minSwipeDistance;
 
     if (isLeftSwipe) {
-      if (mode === 'latest') handleModeChange('balanced');
-      else if (mode === 'balanced') handleModeChange('foryou');
+      if (mode === 'latest') handleModeChange('infocus');
+      else if (mode === 'infocus') handleModeChange('balanced');
     }
     if (isRightSwipe) {
-      if (mode === 'foryou') handleModeChange('balanced');
-      else if (mode === 'balanced') handleModeChange('latest');
+      if (mode === 'balanced') handleModeChange('infocus');
+      else if (mode === 'infocus') handleModeChange('latest');
     }
   };
-
-  // --- 4. RENDER HELPERS ---
-
-  const articles = data?.pages.flatMap((page) => page.items) || [];
 
   return (
     <div 
@@ -113,20 +134,24 @@ export function NewsFeed() {
           <div className="flex items-center bg-muted/50 p-1 rounded-full border shadow-sm">
             {[
               { id: 'latest', label: 'Latest' },
+              { id: 'infocus', label: 'Narratives' }, // Restored Name
               { id: 'balanced', label: 'Balanced' },
-              { id: 'foryou', label: 'For You' },
             ].map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => handleModeChange(tab.id as FeedMode)}
                 className={cn(
-                  "px-6 py-1.5 rounded-full text-xs font-semibold transition-all duration-300",
+                  "px-6 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 flex items-center gap-1.5",
                   mode === tab.id
                     ? "bg-primary text-primary-foreground shadow-md scale-105"
                     : "text-muted-foreground hover:text-foreground hover:bg-background/50"
                 )}
               >
                 {tab.label}
+                {/* Lock Icon for Guests on Balanced Tab */}
+                {tab.id === 'balanced' && (!user || isGuest) && (
+                    <Lock className="w-3 h-3 opacity-70" />
+                )}
               </button>
             ))}
           </div>
@@ -172,25 +197,30 @@ export function NewsFeed() {
             isRefetching ? "opacity-50" : "opacity-100"
         )}>
             {articles.map((article) => (
-            <ArticleCard key={article.id} article={article} />
+              <ArticleCard key={article.id} article={article} />
             ))}
         </div>
 
-        {/* Infinite Scroll Loader */}
-        <div ref={ref} className="flex justify-center py-8">
-          {isFetchingNextPage ? (
-            <Loader2 className="h-6 w-6 animate-spin text-primary" />
-          ) : hasNextPage ? (
-            <span className="text-xs text-muted-foreground">Scroll for more</span>
-          ) : articles.length > 0 ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <div className="h-px w-8 bg-border" />
-                <span>End of Stream</span>
-                <div className="h-px w-8 bg-border" />
+        {/* Infinite Scroll Loader (Only for Main/InFocus) */}
+        {mode !== 'balanced' && (
+            <div ref={ref} className="flex justify-center py-8">
+            {mainFeedQuery.isFetchingNextPage ? (
+                <Loader2 className="h-6 w-6 animate-spin text-primary" />
+            ) : mainFeedQuery.hasNextPage ? (
+                <span className="text-xs text-muted-foreground">Scroll for more</span>
+            ) : articles.length > 0 ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div className="h-px w-8 bg-border" />
+                    <span>End of Stream</span>
+                    <div className="h-px w-8 bg-border" />
+                </div>
+            ) : null}
             </div>
-          ) : null}
-        </div>
+        )}
       </div>
+
+      {/* Placeholder for Login Modal - You can implement or import your existing one */}
+      {/* <LoginModal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} /> */}
     </div>
   );
 }
