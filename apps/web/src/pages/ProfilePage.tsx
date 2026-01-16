@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { BadgeGrid } from '../components/profile/BadgeGrid';
 import { FeedItem } from '../components/FeedItem';
 import { Button } from '../components/ui/button';
-import { Settings, Flame, BookOpen, ShieldCheck, Loader2 } from 'lucide-react';
+import { Settings, Flame, BookOpen, ShieldCheck, Loader2, PieChart } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 export function ProfilePage() {
@@ -12,7 +12,7 @@ export function ProfilePage() {
   const [activeTab, setActiveTab] = useState("overview");
 
   // Fetch Profile Data (Auto-cached by React Query/TRPC)
-  const { data: profile, isLoading } = trpc.profile.getMyProfile.useQuery(undefined, {
+  const { data: profile, isLoading } = trpc.profile.getMe.useQuery(undefined, {
     enabled: !!user,
   });
 
@@ -26,8 +26,12 @@ export function ProfilePage() {
 
   if (!profile) return null;
 
+  // Safely access nested objects
+  const stats = profile.stats || { articlesViewed: 0, totalTimeSpent: 0 };
+  const gamification = profile.gamification || { streak: 0, badges: [], level: 1 };
+
   return (
-    <div className="space-y-6 fade-in animate-in slide-in-from-bottom-4 duration-500">
+    <div className="space-y-6 fade-in animate-in slide-in-from-bottom-4 duration-500 pb-20">
       
       {/* 1. HERO HEADER */}
       <section className="relative rounded-2xl overflow-hidden glass p-6 md:p-10 flex flex-col md:flex-row items-center gap-6 border-b-4 border-primary">
@@ -44,7 +48,7 @@ export function ProfilePage() {
           {/* Level Pill */}
           <div className="absolute -bottom-2 -right-2 bg-background p-1.5 rounded-full shadow-sm">
             <div className="bg-primary text-[10px] text-primary-foreground font-bold px-2 py-0.5 rounded-full">
-              Lvl {Math.floor((profile.stats?.articlesViewed || 0) / 10) + 1}
+              Lvl {gamification.level}
             </div>
           </div>
         </div>
@@ -52,16 +56,17 @@ export function ProfilePage() {
         {/* User Info */}
         <div className="flex-1 text-center md:text-left space-y-2">
           <h1 className="text-3xl font-logo font-bold">{profile.username}</h1>
-          <p className="text-muted-foreground text-sm">Member since {new Date(profile.createdAt).getFullYear()}</p>
+          <p className="text-muted-foreground text-sm">Member since {new Date(profile.createdAt || Date.now()).getFullYear()}</p>
           
           {/* Quick Stats Bar */}
           <div className="flex items-center justify-center md:justify-start gap-4 pt-2">
              <div className="flex items-center gap-1.5 bg-secondary/50 px-3 py-1 rounded-full border border-border">
                <Flame className="h-4 w-4 text-orange-500 fill-orange-500" />
-               <span className="font-bold text-sm">{profile.gamification.streak} Day Streak</span>
+               <span className="font-bold text-sm">{gamification.streak} Day Streak</span>
              </div>
              <div className="flex items-center gap-1.5 px-3 py-1 text-muted-foreground">
-               <span className="text-sm font-medium">{profile.stats.articlesViewed} Reads</span>
+               <BookOpen className="h-3 w-3" />
+               <span className="text-sm font-medium">{stats.articlesViewed} Reads</span>
              </div>
           </div>
         </div>
@@ -85,18 +90,18 @@ export function ProfilePage() {
                 <BookOpen className="h-5 w-5" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{profile.stats.articlesViewed}</p>
-                <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Articles</p>
+                <p className="text-2xl font-bold">{stats.articlesViewed}</p>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Articles Read</p>
               </div>
             </div>
 
             <div className="glass-card p-4 rounded-xl flex items-center gap-4 hover:bg-secondary/20 transition-colors">
-              <div className="p-3 bg-green-500/10 rounded-lg text-green-500">
-                <ShieldCheck className="h-5 w-5" />
+              <div className="p-3 bg-purple-500/10 rounded-lg text-purple-500">
+                <PieChart className="h-5 w-5" />
               </div>
               <div>
-                <p className="text-2xl font-bold">Top 10%</p>
-                <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Rank</p>
+                <p className="text-2xl font-bold">{Math.floor(stats.totalTimeSpent / 60)}</p>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider font-semibold">Minutes Read</p>
               </div>
             </div>
           </div>
@@ -104,9 +109,10 @@ export function ProfilePage() {
           {/* Badges Module */}
           <div className="glass-card p-5 rounded-xl space-y-4">
             <h3 className="font-bold font-logo text-lg flex items-center gap-2">
-              Achievements <span className="text-xs bg-primary/20 text-primary px-2 py-0.5 rounded-full">{profile.gamification.badges.length}</span>
+              Achievements <span className="text-xs bg-primary/20 text-primary px-2 py-0.5 rounded-full">{gamification.badges.length}</span>
             </h3>
-            <BadgeGrid earnedBadges={profile.gamification.badges} />
+            {/* Using your existing BadgeGrid component */}
+            <BadgeGrid earnedBadges={gamification.badges} />
           </div>
         </div>
 
@@ -133,8 +139,12 @@ export function ProfilePage() {
           <div className="min-h-[300px]">
             {activeTab === 'overview' && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2">
+                 {/* Here we can eventually plug in the BiasMap/Echo Chamber visual 
+                     using stats.leanExposure 
+                 */}
                  <div className="p-8 text-center text-muted-foreground border-2 border-dashed border-border/50 rounded-xl bg-secondary/5">
-                   <p>Your personalized recommendations will appear here.</p>
+                   <p className="mb-2">Your reading insights and recommendations will appear here.</p>
+                   <p className="text-xs text-muted-foreground/50">Read more articles to unlock detailed analysis.</p>
                  </div>
               </div>
             )}
