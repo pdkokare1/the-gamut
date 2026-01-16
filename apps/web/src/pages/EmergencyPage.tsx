@@ -1,97 +1,125 @@
+// apps/web/src/pages/EmergencyPage.tsx
 import { useState } from 'react';
-import { trpc } from '@/utils/trpc';
-import { Phone, ExternalLink, Shield, HeartPulse, Scale, Globe } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { trpc } from '../utils/trpc';
+import { 
+    Phone, Search, Shield, Flame, 
+    Ambulance, Siren, Train, Navigation, 
+    MapPin, AlertCircle, Loader2 
+} from 'lucide-react';
+import { Input } from '../components/ui/input';
+import { Button } from '../components/ui/button';
+import { Card, CardContent } from '../components/ui/card';
+import { Badge } from '../components/ui/badge';
+import { cn } from '../lib/utils';
 
 export function EmergencyPage() {
-  const [search, setSearch] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
   
-  // Fetch contacts from DB
-  const { data: contacts, isLoading } = trpc.emergency.getAll.useQuery();
+  // Fetch data
+  const { data: contacts, isLoading } = trpc.emergency.getAll.useQuery(undefined, {
+      staleTime: Infinity // Static data rarely changes
+  });
 
+  const criticalContacts = [
+    { name: 'Police', number: '100', icon: <Shield className="h-6 w-6 text-blue-500" /> },
+    { name: 'Ambulance', number: '108', icon: <Ambulance className="h-6 w-6 text-red-500" /> },
+    { name: 'Fire', number: '101', icon: <Flame className="h-6 w-6 text-orange-500" /> },
+    { name: 'Women Helpline', number: '1091', icon: <Siren className="h-6 w-6 text-pink-500" /> },
+    { name: 'Highway', number: '1033', icon: <Navigation className="h-6 w-6 text-yellow-500" /> },
+    { name: 'Railway', number: '139', icon: <Train className="h-6 w-6 text-indigo-500" /> },
+  ];
+
+  // Filtering
   const filteredContacts = contacts?.filter(c => 
-    c.name.toLowerCase().includes(search.toLowerCase()) || 
-    c.description.toLowerCase().includes(search.toLowerCase())
+      c.serviceName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.number.includes(searchTerm) ||
+      (c.scope && c.scope.toLowerCase().includes(searchTerm.toLowerCase()))
   ) || [];
 
-  const getIcon = (type: string) => {
-    switch(type) {
-      case 'Medical': return <HeartPulse className="h-5 w-5 text-red-500" />;
-      case 'Legal': return <Scale className="h-5 w-5 text-blue-500" />;
-      case 'Global': return <Globe className="h-5 w-5 text-purple-500" />;
-      default: return <Shield className="h-5 w-5 text-green-500" />;
-    }
-  };
-
   return (
-    <div className="max-w-4xl mx-auto space-y-8 pb-20 fade-in">
+    <div className="container max-w-2xl mx-auto px-4 py-6 space-y-8 pb-24">
       
-      {/* Header */}
-      <div className="text-center space-y-4 py-8">
-        <div className="inline-flex items-center justify-center p-3 bg-red-500/10 rounded-full text-red-500 mb-4">
-           <Shield className="h-8 w-8" />
-        </div>
-        <h1 className="text-3xl font-heading font-bold">Emergency Resources</h1>
-        <p className="text-muted-foreground max-w-xl mx-auto">
-          Verified contacts for medical, legal, and safety assistance. 
-          If you are in immediate danger, please call your local emergency services (911) immediately.
-        </p>
+      {/* HEADER */}
+      <div className="text-center space-y-2">
+         <div className="mx-auto w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mb-4">
+            <AlertCircle className="w-6 h-6 text-red-600" />
+         </div>
+         <h1 className="text-2xl font-bold tracking-tight">Emergency Resources</h1>
+         <p className="text-muted-foreground text-sm">Tap any card to call instantly.</p>
       </div>
 
-      {/* Search */}
-      <div className="relative max-w-md mx-auto">
-        <Input 
-          placeholder="Search resources (e.g., 'Legal Aid', 'Mental Health')..." 
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="pl-10 bg-secondary/50 border-transparent focus:border-primary"
-        />
-        <Shield className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      {/* CRITICAL GRID */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {criticalContacts.map((c) => (
+              <a href={`tel:${c.number}`} key={c.name} className="no-underline">
+                  <div className="flex flex-col items-center justify-center p-4 bg-card border rounded-xl shadow-sm hover:shadow-md transition-all active:scale-95">
+                      <div className="mb-2 p-2 bg-muted/50 rounded-full">
+                          {c.icon}
+                      </div>
+                      <span className="text-sm font-medium">{c.name}</span>
+                      <span className="text-xs font-bold text-red-600 mt-1">{c.number}</span>
+                  </div>
+              </a>
+          ))}
       </div>
 
-      {/* Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {isLoading ? (
-           [1,2,3,4].map(i => <div key={i} className="h-32 bg-muted/40 animate-pulse rounded-xl" />)
-        ) : filteredContacts.length > 0 ? (
-          filteredContacts.map((contact) => (
-            <Card key={contact.id} className="hover:shadow-md transition-shadow border-l-4 border-l-primary">
-              <CardHeader className="pb-2">
-                 <div className="flex justify-between items-start">
-                    <div className="flex items-center gap-2">
-                       {getIcon(contact.type)}
-                       <CardTitle className="text-lg">{contact.name}</CardTitle>
-                    </div>
-                    <Badge variant="secondary">{contact.country}</Badge>
-                 </div>
-                 <CardDescription>{contact.description}</CardDescription>
-              </CardHeader>
-              <CardContent className="pt-2 flex gap-3">
-                 <Button className="flex-1" variant="default" asChild>
-                    <a href={`tel:${contact.phone}`}>
-                       <Phone className="mr-2 h-4 w-4" /> Call
-                    </a>
-                 </Button>
-                 {contact.website && (
-                   <Button className="flex-1" variant="outline" asChild>
-                      <a href={contact.website} target="_blank" rel="noopener noreferrer">
-                         <ExternalLink className="mr-2 h-4 w-4" /> Website
-                      </a>
-                   </Button>
-                 )}
-              </CardContent>
-            </Card>
-          ))
-        ) : (
-          <div className="col-span-full text-center py-10 text-muted-foreground">
-             No resources found matching "{search}".
+      {/* SEARCH */}
+      <div className="relative">
+          <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+          <Input 
+              placeholder="Search by service, city, or number..." 
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-9 bg-muted/30"
+          />
+      </div>
+
+      {/* RESULTS LIST */}
+      {isLoading ? (
+          <div className="flex justify-center py-10">
+              <Loader2 className="animate-spin text-muted-foreground" />
           </div>
-        )}
-      </div>
-
+      ) : (
+          <div className="space-y-4">
+              {filteredContacts.length === 0 ? (
+                  <p className="text-center text-muted-foreground py-8">No contacts found.</p>
+              ) : (
+                  filteredContacts.map((contact, idx) => (
+                      <Card key={idx} className="overflow-hidden">
+                          <CardContent className="p-4">
+                              <div className="flex justify-between items-start gap-4">
+                                  <div className="space-y-1">
+                                      <h3 className="font-semibold text-base">{contact.serviceName}</h3>
+                                      <p className="text-xs text-muted-foreground">{contact.description}</p>
+                                      <div className="flex flex-wrap gap-2 mt-2">
+                                          <Badge variant="outline" className="text-[10px] h-5">{contact.scope}</Badge>
+                                          <Badge variant="secondary" className="text-[10px] h-5">{contact.category}</Badge>
+                                      </div>
+                                  </div>
+                                  
+                                  <div className="flex flex-col gap-2 shrink-0">
+                                      {/* Handle multiple numbers (e.g., "100 or 112") */}
+                                      {contact.number.split(/[\/,o]+r/).map((numRaw) => {
+                                          const num = numRaw.trim();
+                                          if (!num) return null;
+                                          return (
+                                              <a href={`tel:${num}`} key={num}>
+                                                  <Button size="sm" className="w-full gap-2 bg-green-600 hover:bg-green-700 h-8 text-xs">
+                                                      <Phone className="w-3 h-3" />
+                                                      {num}
+                                                  </Button>
+                                              </a>
+                                          );
+                                      })}
+                                  </div>
+                              </div>
+                          </CardContent>
+                      </Card>
+                  ))
+              )}
+          </div>
+      )}
     </div>
   );
 }
