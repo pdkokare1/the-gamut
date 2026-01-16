@@ -1,47 +1,39 @@
-import { cn } from '@/lib/utils';
+import { cn } from '../../lib/utils';
 
 interface BiasChartProps {
-  sources: { source: string; lean: string }[];
+  score: number; // -10 (Far Left) to 10 (Far Right)
+  lean: string;
 }
 
-export function BiasChart({ sources }: BiasChartProps) {
-  // 1. Calculate Distribution
-  const total = sources.length || 1;
-  const counts = {
-    left: sources.filter(s => s.lean === 'Left' || s.lean === 'Left-Center').length,
-    center: sources.filter(s => s.lean === 'Center').length,
-    right: sources.filter(s => s.lean === 'Right' || s.lean === 'Right-Center').length,
-  };
-
-  const percentages = {
-    left: Math.round((counts.left / total) * 100),
-    center: Math.round((counts.center / total) * 100),
-    right: Math.round((counts.right / total) * 100),
-  };
+export function BiasChart({ score, lean }: BiasChartProps) {
+  // Normalize score to percentage (0% = Far Left, 50% = Center, 100% = Far Right)
+  // Assuming input score is -10 to 10
+  const percentage = ((score + 10) / 20) * 100;
 
   return (
-    <div className="space-y-4">
-      {/* Visual Bar */}
-      <div className="h-4 w-full rounded-full overflow-hidden flex shadow-inner bg-secondary/30">
-        <div style={{ width: `${percentages.left}%` }} className="bg-lean-left h-full transition-all duration-1000 ease-out" />
-        <div style={{ width: `${percentages.center}%` }} className="bg-lean-center h-full transition-all duration-1000 ease-out" />
-        <div style={{ width: `${percentages.right}%` }} className="bg-lean-right h-full transition-all duration-1000 ease-out" />
+    <div className="flex flex-col items-center w-full space-y-2">
+      <div className="relative w-full h-4 bg-muted rounded-full overflow-hidden">
+        {/* Gradient Background */}
+        <div className="absolute inset-0 bg-gradient-to-r from-blue-500 via-gray-300 to-red-500 opacity-50" />
+        
+        {/* Needle */}
+        <div 
+            className="absolute top-0 bottom-0 w-1 bg-foreground shadow-sm transition-all duration-500 ease-out"
+            style={{ left: `${Math.min(Math.max(percentage, 0), 100)}%` }}
+        />
       </div>
-
-      {/* Legend / Stats */}
-      <div className="grid grid-cols-3 text-center text-xs">
-        <div className="space-y-1">
-          <p className="font-bold text-lean-left">{percentages.left}%</p>
-          <p className="text-muted-foreground uppercase tracking-wider">Left</p>
-        </div>
-        <div className="space-y-1">
-          <p className="font-bold text-lean-center">{percentages.center}%</p>
-          <p className="text-muted-foreground uppercase tracking-wider">Center</p>
-        </div>
-        <div className="space-y-1">
-          <p className="font-bold text-lean-right">{percentages.right}%</p>
-          <p className="text-muted-foreground uppercase tracking-wider">Right</p>
-        </div>
+      
+      <div className="flex justify-between w-full text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
+        <span className="text-blue-600">Left</span>
+        <span className="text-gray-500">Center</span>
+        <span className="text-red-600">Right</span>
+      </div>
+      
+      <div className="text-xs font-medium border px-2 py-0.5 rounded bg-background/50">
+        Rated: <span className={cn(
+            lean === 'Left' ? "text-blue-600" : 
+            lean === 'Right' ? "text-red-600" : "text-gray-600"
+        )}>{lean}</span> ({score > 0 ? '+' : ''}{score})
       </div>
     </div>
   );
