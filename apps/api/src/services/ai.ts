@@ -1,18 +1,16 @@
 // apps/api/src/services/ai.ts
-
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
-import { logger } from '../utils/logger'; // Updated import path
+import { logger } from '../utils/logger'; 
 import KeyManager from '../utils/KeyManager';
-import apiClient from '../utils/apiClient'; // Ensure this util exists or use axios directly
-import config from '../config'; // Updated path
+import apiClient from '../utils/apiClient'; 
+import config from '../config'; 
 import AppError from '../utils/AppError';
 import CircuitBreaker from '../utils/CircuitBreaker';
-import promptManager from '../utils/promptManager'; // Ensure this is ported
-import { CONSTANTS } from '../utils/constants'; // Ensure this is ported
+import promptManager from '../utils/promptManager';
+import { CONSTANTS } from '../utils/constants'; 
 
 // --- Validation Schemas (Zod) ---
-// Kept exactly as they were, but ensured Zod is used for runtime validation
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
@@ -78,7 +76,7 @@ const NarrativeSchema = z.object({
 });
 
 // --- Constants ---
-const EMBEDDING_MODEL = "text-embedding-004"; // Hardcoded or from CONSTANTS
+const EMBEDDING_MODEL = CONSTANTS.AI_MODELS?.EMBEDDING || "text-embedding-004";
 const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
@@ -88,7 +86,7 @@ const NEWS_SAFETY_SETTINGS = [
 
 class AIService {
   constructor() {
-    // Initialize Keys
+    // Initialize Keys from new config structure
     if (config.keys?.gemini && config.keys.gemini.length > 0) {
         KeyManager.registerProviderKeys('GEMINI', config.keys.gemini);
     } else {
@@ -156,7 +154,6 @@ class AIService {
         headline: article.headline ? this.cleanText(article.headline) : ""
     };
     
-    // Min char check
     if (optimizedArticle.summary.length < 50) {
         return this.getFallbackAnalysis(article);
     }
@@ -171,9 +168,6 @@ class AIService {
                 safetySettings: NEWS_SAFETY_SETTINGS, 
                 generationConfig: {
                   responseMimeType: "application/json", 
-                  // In Vercel/Node environment, we trust the prompt structure mostly, 
-                  // but we pass schema if supported by the model version.
-                  // For now, relying on JSON mode.
                   temperature: 0.1, 
                   maxOutputTokens: 8192 
                 }
@@ -256,6 +250,7 @@ class AIService {
              chunks.push(chunk);
         }
 
+        // Sequential processing to avoid rate limits
         for (const chunk of chunks) {
             const requests = chunk.map(item => ({
                 model: `models/${EMBEDDING_MODEL}`,
