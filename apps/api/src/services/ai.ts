@@ -98,6 +98,7 @@ class AIService {
   // --- Helpers ---
 
   private cleanText(text: string): string {
+    if (!text) return "";
     return text.replace(/\s+/g, ' ').trim();
   }
 
@@ -154,7 +155,8 @@ class AIService {
         headline: article.headline ? this.cleanText(article.headline) : ""
     };
     
-    if (optimizedArticle.summary.length < 50) {
+    // Safety check for empty content
+    if (!optimizedArticle.summary || optimizedArticle.summary.length < 50) {
         return this.getFallbackAnalysis(article);
     }
 
