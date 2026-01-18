@@ -1,104 +1,213 @@
 // apps/api/src/services/article-processor.ts
-import { JUNK_KEYWORDS, TRUSTED_SOURCES } from '../utils/constants';
+import { prisma } from '@gamut/db';
+import { logger } from '../utils/logger';
+import aiService from './ai';
+import clusteringService from './clustering';
+import gatekeeperService from './gatekeeper';
+import crypto from 'crypto';
 
-// Helper: Similarity Score (Levenshtein/Jaccard simplified)
-const getSimilarityScore = (s1: string, s2: string): number => {
-    const longer = s1.length > s2.length ? s1 : s2;
-    const shorter = s1.length > s2.length ? s2 : s1;
-    if (longer.length === 0) return 1.0;
-    return (longer.length - editDistance(longer, shorter)) / longer.length;
-};
+// Types matches the Raw Article Input from Scrapers
+interface RawArticle {
+    title: string;
+    link: string;
+    description?: string;
+    content?: string;
+    pubDate?: string;
+    source?: { id?: string; name: string };
+    image_url?: string;
+    category?: string; // Optional input category
+}
 
-const editDistance = (s1: string, s2: string) => {
-    const costs = new Array();
-    for (let i = 0; i <= s1.length; i++) {
-        let lastValue = i;
-        for (let j = 0; j <= s2.length; j++) {
-            if (i == 0) costs[j] = j;
-            else {
-                if (j > 0) {
-                    let newValue = costs[j - 1];
-                    if (s1.charAt(i - 1) != s2.charAt(j - 1))
-                        newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
-                    costs[j - 1] = lastValue;
-                    lastValue = newValue;
-                }
+class ArticleProcessor {
+
+    // =================================================================
+    // Main Batch Entry Point
+    // =================================================================
+    async processBatch(rawArticles: RawArticle[]): Promise<{ added: number; failed: number }> {
+        let added = 0;
+        let failed = 0;
+
+        logger.info(`🏭 Processing Batch of ${rawArticles.length} articles...`);
+
+        // Process strictly sequentially to manage AI Rate Limits
+        // (In a real worker environment, we might parallelize this slightly, e.g., Promise.all of size 3)
+        for (const raw of rawArticles) {
+            try {
+                const result = await this.processSingleArticle(raw);
+                if (result) added++;
+                else failed++;
+            } catch (error: any) {
+                logger.error(`❌ Error processing ${raw.title?.substring(0, 30)}: ${error.message}`);
+                failed++;
             }
         }
-        if (i > 0) costs[s2.length] = lastValue;
+
+        return { added, failed };
     }
-    return costs[s2.length];
-};
 
-export const articleProcessor = {
-    /**
-     * Determines if an article is worth processing.
-     * Returns a score. If < 0, it should be rejected.
-     */
-    calculateQualityScore(article: any): number {
-        let score = 0;
-        const titleLower = (article.title || article.headline || "").toLowerCase();
-        const sourceLower = (article.source?.name || article.source || "").toLowerCase();
+    // =================================================================
+    // Single Article Pipeline
+    // =================================================================
+    private async processSingleArticle(raw: RawArticle): Promise<boolean> {
         
-        // 1. Source Trust
-        const isTrusted = TRUSTED_SOURCES.some(src => sourceLower.includes(src.toLowerCase()));
-        if (isTrusted) score += 5;
+        // --- Step 1: Normalization ---
+        const articleData = this.normalizeData(raw);
+        if (!articleData) return false;
 
-        // 2. Image Validations
-        const hasImage = article.image || article.imageUrl;
-        if (hasImage && hasImage.startsWith('http')) {
-            score += 2;
-        } else {
-            // Penalty for no image unless it's a highly trusted text source
-            score -= isTrusted ? 2 : 10;
+        // --- Step 2: Deduplication (Fast) ---
+        // Check URL Hash first
+        const existingHash = await prisma.article.findUnique({
+            where: { urlHash: articleData.urlHash }
+        });
+        if (existingHash) {
+            // Update timestamp if seen again? Usually ignore.
+            return false; 
         }
 
-        // 3. Content Depth
-        if (titleLower.length > 40) score += 1;
-        const descLength = (article.description || article.summary || "").length;
-        if (descLength < 50) score -= 5;
-
-        // 4. The "Trap" (Junk Keywords)
-        // Instant kill for clickbait or unwanted topics
-        if (JUNK_KEYWORDS.some(word => titleLower.includes(word))) score -= 20;
-
-        return score;
-    },
-
-    /**
-     * Strict Validation Check
-     */
-    isValid(article: any): boolean {
-        if (!article.title && !article.headline) return false;
-        if (!article.url) return false;
-
-        const title = article.title || article.headline;
-        const desc = article.description || article.summary || "";
-
-        // Filter out "Ticker" updates or empty shells
-        if (title.length < 15) return false;
-        if (title === "No Title") return false;
-        
-        // Word Count Check (AI needs at least ~40 words to summarize)
-        const totalWords = (title + " " + desc).split(/\s+/).length;
-        if (totalWords < 20) return false;
-
-        return true;
-    },
-
-    /**
-     * Fuzzy Title Matcher
-     */
-    isFuzzyDuplicate(currentTitle: string, existingTitles: string[]): boolean {
-        const currentLen = currentTitle.length;
-        
-        for (const existing of existingTitles) {
-            // Optimization: Skip if length difference is huge
-            if (Math.abs(currentLen - existing.length) > 20) continue;
-            
-            const score = getSimilarityScore(currentTitle.toLowerCase(), existing.toLowerCase());
-            if (score > 0.85) return true; // 85% match = duplicate
+        // --- Step 3: Gatekeeper Filter ---
+        const gateCheck = await gatekeeperService.filter(articleData);
+        if (!gateCheck.pass) {
+            logger.debug(`🚫 Gatekeeper Blocked: ${articleData.headline} (${gateCheck.reason})`);
+            return false;
         }
-        return false;
+
+        // --- Step 4: Embedding (Vector) ---
+        // We generate this *before* clustering because clustering relies on it.
+        const embedding = await aiService.createEmbedding(
+            `${articleData.headline} ${articleData.description || ''}`
+        );
+
+        if (!embedding) {
+            logger.warn(`⚠️ No embedding generated for: ${articleData.headline} (Skipping Vector Checks)`);
+        }
+
+        // --- Step 5: Clustering ---
+        // Assigns a Cluster ID (Event Group)
+        const clusterId = await clusteringService.assignClusterId(articleData, embedding || undefined);
+
+        // --- Step 6: AI Analysis (The "Brain") ---
+        // We perform full analysis for the main DB record
+        let analysis: any = {};
+        try {
+            analysis = await aiService.analyzeArticle(articleData, 'gemini-1.5-flash', 'Full');
+        } catch (err) {
+            // Fallback: Save as "Basic" if AI fails, don't lose the data
+            logger.warn(`AI Analysis failed, saving basic record: ${articleData.headline}`);
+            analysis = {
+                summary: articleData.description || "No summary available.",
+                category: articleData.category || "General",
+                sentiment: "Neutral",
+                politicalLean: "Not Applicable",
+                biasScore: 0,
+                trustScore: 50
+            };
+        }
+
+        // --- Step 7: Database Save (Prisma) ---
+        try {
+            await prisma.article.create({
+                data: {
+                    // Unique IDs
+                    urlHash: articleData.urlHash,
+                    
+                    // Core Data
+                    headline: articleData.headline,
+                    originalUrl: articleData.url,
+                    description: articleData.description,
+                    content: articleData.content || "",
+                    imageUrl: articleData.imageUrl,
+                    source: articleData.source,
+                    author: "Unknown", // Scrapers need to provide this if available
+                    publishedAt: articleData.publishedAt,
+                    
+                    // Logic / AI Data
+                    clusterId: clusterId,
+                    category: analysis.category || "General",
+                    country: analysis.country || "Global",
+                    language: "en",
+                    
+                    // Vector Data
+                    // Note: Prisma schema must have Unsupported("vector(768)") or similar
+                    // If using MongoDB, it's just a float array
+                    embedding: embedding ? embedding : [],
+
+                    // AI Analysis Results
+                    summary: analysis.summary,
+                    sentiment: analysis.sentiment,
+                    biasScore: analysis.biasScore || 0,
+                    politicalLean: analysis.politicalLean || "Not Applicable",
+                    credibilityScore: analysis.credibilityScore || 0,
+                    reliabilityScore: analysis.reliabilityScore || 0,
+                    trustScore: analysis.trustScore || 0,
+                    
+                    // JSON Fields (Complex Data)
+                    keyFindings: analysis.keyFindings || [],
+                    recommendations: analysis.recommendations || [],
+                    biasComponents: analysis.biasComponents || {},
+                    credibilityComponents: analysis.credibilityComponents || {},
+                    
+                    // Meta
+                    isLatest: true // Will be fixed by clustering optimization later
+                }
+            });
+
+            // Trigger post-save optimization (background)
+            if (clusterId > 0) {
+                // Ensure only one "latest" article per cluster
+                clusteringService.optimizeClusterFeed(clusterId).catch(console.error);
+            }
+
+            return true;
+
+        } catch (dbError: any) {
+            if (dbError.code === 'P2002') {
+                // Unique constraint failed (race condition on URL hash)
+                return false;
+            }
+            logger.error(`Database Save Error: ${dbError.message}`);
+            return false;
+        }
     }
-};
+
+    // =================================================================
+    // Helpers
+    // =================================================================
+    private normalizeData(raw: RawArticle) {
+        if (!raw.link || !raw.title) return null;
+
+        const url = raw.link.trim();
+        
+        // Generate Hash for Deduplication
+        const urlHash = crypto.createHash('sha256').update(url).digest('hex');
+
+        // Parse Date
+        let publishedAt = new Date();
+        if (raw.pubDate) {
+            const parsed = new Date(raw.pubDate);
+            if (!isNaN(parsed.getTime())) publishedAt = parsed;
+        }
+
+        return {
+            url,
+            urlHash,
+            headline: this.cleanText(raw.title),
+            description: this.cleanText(raw.description || ""),
+            content: this.cleanText(raw.content || ""),
+            imageUrl: raw.image_url || "",
+            source: raw.source?.name || "Unknown Source",
+            publishedAt,
+            category: raw.category || "General"
+        };
+    }
+
+    private cleanText(text: string): string {
+        if (!text) return "";
+        return text
+            .replace(/<[^>]*>?/gm, '') // Strip HTML
+            .replace(/&nbsp;/g, ' ')
+            .replace(/\s+/g, ' ')      // Collapse whitespace
+            .trim();
+    }
+}
+
+export default new ArticleProcessor();
