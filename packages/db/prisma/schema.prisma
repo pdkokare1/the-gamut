@@ -36,7 +36,7 @@ model Article {
   // -- Scoring & Metrics --
   biasScore            Float    @default(0)
   biasLabel            String?
-  biasComponents       Json?    // Replaces Schema.Types.Mixed
+  biasComponents       Json?    // Flexible JSON to replace Mongoose Mixed
   
   credibilityScore     Float    @default(0)
   credibilityGrade     String?
@@ -48,21 +48,25 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-
+  
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
   coverageRight  Float @default(0)
   
-  // -- Clustering --
+  // -- Clustering & Feed Logic --
   clusterId      Int?
   clusterTopic   String?
   country        String  @default("Global")
   primaryNoun    String?
   secondaryNoun  String?
   
+  // [ADDED] Critical for feed optimization (hiding older versions)
+  isLatest       Boolean @default(true)
+  
   // -- Vector Data --
-  // Note: Prisma does not support 'select: false'. We will exclude this field in API queries manually.
+  // Note: Prisma does not support 'select: false'.
+  // We will exclude this field in API queries manually via select types.
   embedding      Float[]
   
   keyFindings     String[]
@@ -72,20 +76,18 @@ model Article {
   updatedAt       DateTime @updatedAt
 
   // -- Relations --
-  // "savedByProfiles" allows us to find users who saved this article (New Feature)
   savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id])
   savedByProfileIds String[]      @db.ObjectId
 
   activityLogs      ActivityLog[]
 
   // -- Indexes --
-  // Mapped from old Mongoose Compound Indexes
+  // Note: Compound indexes in MongoDB/Prisma help query performance
   @@index([category, politicalLean, publishedAt])
   @@index([politicalLean, trustScore, publishedAt]) // Trusted News Feed
   @@index([clusterId, publishedAt])                 // Cluster View
   @@index([country, category, publishedAt])         // Regional News
-  
-  // Note: Text Indexes (headline: 'text') must be created in MongoDB Atlas directly.
+  @@index([isLatest, publishedAt])                  // [ADDED] Feed Optimization Index
 }
 
 model Narrative {
@@ -104,12 +106,11 @@ model Narrative {
 
   category         String?
   country          String?
-
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   
-  // Mongoose had a TTL index of 14 days. 
-  // You should verify this index exists in Atlas: { updatedAt: 1 }, { expireAfterSeconds: 1209600 }
+  // Note: Ensure TTL index { updatedAt: 1 }, { expireAfterSeconds: 1209600 } exists in Atlas
 }
 
 // ==========================================
@@ -119,7 +120,11 @@ model Narrative {
 model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique // Auth ID (Firebase)
-  email                 String   @unique
+  email                 String?  @unique
+  
+  // [ADDED] Required for Phone Auth users
+  phoneNumber           String?  @unique
+  
   username              String   @unique
   
   // -- Stats --
@@ -161,9 +166,7 @@ model ActivityLog {
   action    ActionType @default(view_analysis)
   timestamp DateTime   @default(now())
 
-  // Optimized for "Get user history"
   @@index([userId, timestamp(sort: Desc)])
-  // Optimized for "Get specific action history"
   @@index([userId, action, timestamp(sort: Desc)])
 }
 
@@ -201,7 +204,10 @@ model EmergencyContact {
 model SystemConfig {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
-  value       String[]
+  
+  // [CHANGED] String[] -> Json to support complex configs (Booleans, Objects)
+  value       Json
+  
   lastUpdated DateTime @default(now())
 }
 
@@ -240,7 +246,7 @@ type Perspective {
   stance String
 }
 
-// Enums (Replaces String checks)
+// Enums
 enum AnalysisType {
   Full
   SentimentOnly
