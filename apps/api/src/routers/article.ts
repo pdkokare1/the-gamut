@@ -1,89 +1,177 @@
+// apps/api/src/routers/article.ts
 import { z } from "zod";
 import { router, publicProcedure, protectedProcedure } from "../trpc";
 import { TRPCError } from "@trpc/server";
-import { feedService } from "../services/feed-algo";
+import { feedService } from "../services/feed-service";
 
 export const articleRouter = router({
   // =================================================================
-  // 1. GET MAIN FEED (Smart Weighted Feed)
+  // 1. MAIN FEED (Smart Weighted Feed)
+  // Replaces: articleController.getMainFeed
   // =================================================================
   getFeed: publicProcedure
     .input(
       z.object({
         limit: z.number().min(1).max(50).default(20),
-        cursor: z.string().nullish(), // Used as Offset/Page index for this logic
-        offset: z.number().default(0),
+        cursor: z.string().nullish(), // Used for infinite scroll (ID based)
         
         // Filters
         category: z.string().optional(),
         politicalLean: z.string().optional(),
         country: z.string().optional(),
-        topic: z.string().optional(),
+        topic: z.string().optional(), // For InFocus context
       })
     )
     .query(async ({ ctx, input }) => {
-      const { limit, offset, category, politicalLean, country, topic } = input;
-
-      // 1. Build Basic Filter Object
-      const where: any = {};
-      if (category && category !== "All") where.category = category;
-      if (politicalLean) where.politicalLean = politicalLean;
-      if (country && country !== "Global") where.country = country;
-      if (topic) where.clusterTopic = topic;
-
-      // 2. Fetch User Profile (for personalization)
-      let userProfile = null;
-      if (ctx.user) {
-         userProfile = await ctx.prisma.profile.findUnique({
-             where: { userId: ctx.user.id }
-         });
-      }
+      const { limit, cursor, category, politicalLean, country, topic } = input;
 
       try {
-        // 3. Call Advanced Feed Service
+        // Fetch User Profile if logged in for personalization
+        let userProfile = null;
+        if (ctx.user) {
+           userProfile = await ctx.prisma.profile.findUnique({
+               where: { userId: ctx.user.id }
+           });
+        }
+
         const items = await feedService.getWeightedFeed(
-            { where, limit, offset }, 
+            { 
+              limit, 
+              cursor, 
+              category: category === "All" ? undefined : category,
+              politicalLean,
+              country,
+              topic
+            }, 
             userProfile
         );
 
+        let nextCursor: typeof cursor = undefined;
+        if (items.length > limit) {
+          const nextItem = items.pop(); // Remove the extra item used for cursor
+          nextCursor = nextItem?.id;
+        }
+
         return {
           items,
-          nextCursor: items.length === limit ? offset + limit : undefined,
+          nextCursor,
         };
       } catch (error) {
         console.error("Feed Error:", error);
-        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Feed failed" });
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to fetch feed" });
       }
     }),
 
   // =================================================================
-  // 2. INTELLIGENT SEARCH (Vector + Text)
+  // 2. IN FOCUS FEED (Narratives)
+  // Replaces: articleController.getInFocusFeed
+  // =================================================================
+  getInFocus: publicProcedure
+    .input(z.object({
+      limit: z.number().default(5)
+    }))
+    .query(async ({ ctx, input }) => {
+      try {
+        const narratives = await feedService.getInFocusNarratives(input.limit);
+        return { data: narratives };
+      } catch (error) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to fetch narratives" });
+      }
+    }),
+
+  // =================================================================
+  // 3. BALANCED FEED (Anti-Echo Chamber)
+  // Replaces: articleController.getBalancedFeed
+  // =================================================================
+  getBalanced: protectedProcedure
+    .input(z.object({
+      limit: z.number().default(10)
+    }))
+    .query(async ({ ctx, input }) => {
+      try {
+        const profile = await ctx.prisma.profile.findUnique({
+          where: { userId: ctx.user.id }
+        });
+        
+        if (!profile) throw new Error("Profile not found");
+
+        const articles = await feedService.getBalancedFeed(profile, input.limit);
+        return { data: articles };
+      } catch (error) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Failed to fetch balanced feed" });
+      }
+    }),
+
+  // =================================================================
+  // 4. INTELLIGENT SEARCH (Vector + Text)
+  // Replaces: articleController.searchArticles
   // =================================================================
   search: publicProcedure
     .input(z.object({ q: z.string() }))
     .query(async ({ ctx, input }) => {
-        // Mocking AI service call for embedding - replace with real call
-        // const embedding = await aiService.getEmbedding(input.q);
-        const embedding = null; // Fallback to text for now
-
-        const results = await feedService.searchArticles(input.q, embedding);
-        return { results };
+        try {
+          const results = await feedService.smartSearch(input.q);
+          return { results };
+        } catch (error) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Search failed" });
+        }
     }),
 
   // =================================================================
-  // 3. TRENDING TOPICS (Hybrid Deduplication)
+  // 5. SAVED ARTICLES
+  // Replaces: articleController.getSavedArticles & toggleSave
   // =================================================================
-  getTrending: publicProcedure
-    .query(async () => {
-        return await feedService.getTrendingTopics();
+  getSaved: protectedProcedure
+    .query(async ({ ctx }) => {
+      const profile = await ctx.prisma.profile.findUnique({
+        where: { userId: ctx.user.id },
+        include: { savedArticles: true } // Relation populate
+      });
+      return { data: profile?.savedArticles || [] };
+    }),
+
+  toggleSave: protectedProcedure
+    .input(z.object({ articleId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      return await feedService.toggleSaveArticle(ctx.user.id, input.articleId);
     }),
 
   // =================================================================
-  // 4. STANDARD CRUD (Keep for Single Article View)
+  // 6. SMART BRIEFING
+  // Replaces: articleController.getSmartBriefing
   // =================================================================
-  getById: publicProcedure
-    .input(z.object({ id: z.string() }))
+  getSmartBriefing: publicProcedure
+    .input(z.object({ articleId: z.string() }))
     .query(async ({ ctx, input }) => {
-      return await ctx.prisma.article.findUnique({ where: { id: input.id } });
-    })
+      const article = await ctx.prisma.article.findUnique({
+        where: { id: input.articleId },
+        select: {
+          headline: true,
+          summary: true,
+          keyFindings: true,
+          recommendations: true,
+          trustScore: true,
+          politicalLean: true,
+          source: true
+        }
+      });
+
+      if (!article) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Article not found" });
+      }
+
+      return {
+        title: article.headline,
+        content: article.summary,
+        keyPoints: article.keyFindings.length > 0 
+          ? article.keyFindings 
+          : ["Analysis in progress..."],
+        recommendations: article.recommendations,
+        meta: {
+          trustScore: article.trustScore,
+          politicalLean: article.politicalLean,
+          source: article.source
+        }
+      };
+    }),
 });
