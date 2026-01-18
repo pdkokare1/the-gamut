@@ -1,179 +1,68 @@
 // apps/api/src/services/pipeline-service.ts
 import crypto from 'crypto';
-import sanitizeHtml from 'sanitize-html';
-import { prisma } from '@gamut/db';
-import { articleProcessor } from './article-processor';
-import { clusteringService } from './clustering';
-import aiService from './ai';
-import gatekeeper from './gatekeeper'; // Assuming gatekeeper exists
-import redis from '../utils/redis';
+import redisHelper from '../utils/redis';
 import { logger } from '../utils/logger';
-import AppError from '../utils/AppError';
+import articleProcessor from './article-processor';
 
-// Constants
-const SEMANTIC_SIMILARITY_MAX_AGE_HOURS = 24;
+// Types for input data (matches GNews article)
+interface QueueArticleData {
+    url: string;
+    title: string;
+    description: string;
+    content: string;
+    image: string;
+    publishedAt: string;
+    source: { name: string; url?: string };
+}
 
 class PipelineService {
-    
-    // --- Duplicate Detection Checks ---
 
-    private async isDuplicate(url: string): Promise<boolean> {
-        if (!url) return true;
-        // Check Redis Set "processed_urls"
-        // Note: In our redis util, we might need to expose raw command or use cache wrapper
-        // Using cache wrapper for simplicity:
-        const cached = await redis.get(`processed:${url}`);
-        return !!cached;
-    }
-
-    private async isTitleDuplicate(title: string): Promise<boolean> {
-        if (!title) return false;
-        const slug = title.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
-        const cached = await redis.get(`processed_title:${slug}`);
-        return !!cached;
-    }
-
-    private sanitizeContent(text: string): string {
-        if (!text) return "";
-        return sanitizeHtml(text, { allowedTags: [], allowedAttributes: {} }).trim();
-    }
-
-    private validateImageUrl(url?: string): string | undefined {
-        if (!url || url.length > 500 || !url.startsWith('http')) return undefined;
-        if (url.includes('1x1') || url.includes('pixel')) return undefined;
-        return url;
-    }
-
-    // --- Main Process ---
-
-    async processSingleArticle(rawArticle: any): Promise<{ status: string; id?: string }> {
-        const startTime = Date.now();
-        const shortTitle = rawArticle.title?.substring(0, 40) || 'Unknown';
-
-        logger.info(`🚀 [Pipeline] Processing: "${shortTitle}..."`);
-
+    /**
+     * Processes a single article from the Queue.
+     * 1. Retrieves cached embedding (Sidecar pattern).
+     * 2. Delegates to ArticleProcessor.
+     */
+    async processSingleArticle(data: QueueArticleData): Promise<{ status: string; articleId?: string }> {
         try {
-            // 1. Validation & Quality Score
-            if (!articleProcessor.isValid(rawArticle)) {
-                return { status: 'INVALID_DATA' };
+            const urlHash = crypto.createHash('md5').update(data.url).digest('hex');
+            
+            // 1. Check for Pre-computed Embedding in Redis
+            // This was saved by the Producer (handlers.ts) to save AI tokens
+            const embeddingKey = `temp:embedding:${urlHash}`;
+            const cachedEmbedding = await redisHelper.get<number[]>(embeddingKey);
+            
+            let preComputedEmbedding: number[] | undefined = undefined;
+            if (cachedEmbedding && Array.isArray(cachedEmbedding) && cachedEmbedding.length > 0) {
+                logger.debug(`⚡ Cache Hit: Using pre-computed embedding for ${urlHash.substring(0, 8)}`);
+                preComputedEmbedding = cachedEmbedding;
+                
+                // Cleanup: We can delete the temp key now to save Redis memory
+                // await redisHelper.del(embeddingKey); 
             }
 
-            const qualityScore = articleProcessor.calculateQualityScore(rawArticle);
-            if (qualityScore < 0) {
-                 logger.info(`[Pipeline] 📉 Low Quality (${qualityScore}): "${shortTitle}"`);
-                 return { status: 'LOW_QUALITY' };
-            }
-
-            // 2. Duplicate Checks (Redis)
-            if (await this.isDuplicate(rawArticle.url)) return { status: 'DUPLICATE_URL' };
-            if (await this.isTitleDuplicate(rawArticle.title)) return { status: 'DUPLICATE_TITLE' };
-
-            // 3. Prepare Data
-            const articleData = {
-                url: rawArticle.url,
-                headline: this.sanitizeContent(rawArticle.title),
-                summary: this.sanitizeContent(rawArticle.description),
-                source: rawArticle.source?.name || 'Unknown',
-                imageUrl: this.validateImageUrl(rawArticle.image || rawArticle.urlToImage),
-                publishedAt: rawArticle.publishedAt ? new Date(rawArticle.publishedAt) : new Date(),
-                content: rawArticle.content // Optional full content
+            // 2. Normalize Input for Processor
+            const rawInput = {
+                title: data.title,
+                link: data.url,
+                description: data.description,
+                content: data.content,
+                pubDate: data.publishedAt,
+                image_url: data.image,
+                source: { name: data.source?.name || 'Unknown' }
             };
 
-            // 4. Gatekeeper (Safety)
-            const gatekeeperResult = await gatekeeper.evaluateArticle(articleData);
-            if (gatekeeperResult.isJunk) {
-                logger.info(`[Pipeline] 🛑 Gatekeeper Rejected: ${gatekeeperResult.reason}`);
-                return { status: 'JUNK_CONTENT' };
-            }
+            // 3. Delegate to Processor
+            const success = await articleProcessor.processSingleArticle(rawInput, preComputedEmbedding);
 
-            // 5. Retrieve Embedding (Sidecar Pattern)
-            // We check Redis for the embedding generated by the Producer (handlers.ts)
-            let embedding: number[] | null = null;
-            if (rawArticle.embedding && Array.isArray(rawArticle.embedding)) {
-                 embedding = rawArticle.embedding;
-            }
-
-            if (!embedding) {
-                const urlHash = crypto.createHash('md5').update(rawArticle.url).digest('hex');
-                const key = `temp:embedding:${urlHash}`;
-                const cachedRaw = await redis.get(key);
-                
-                if (cachedRaw) {
-                    try { embedding = JSON.parse(cachedRaw); } catch (e) {}
-                    await redis.del(key); // Cleanup
-                }
-            }
-
-            // Fallback: If Sidecar missed it, generate now (slower)
-            if (!embedding || embedding.length === 0) {
-                embedding = await aiService.createEmbedding(`${articleData.headline}. ${articleData.summary}`);
-            }
-
-            // 6. Semantic Deduplication & Inheritance
-            let existingMatch = null;
-            if (embedding) {
-                existingMatch = await clusteringService.findSemanticDuplicate(embedding);
-            }
-
-            let analysis: any;
-            let isInherited = false;
-
-            if (existingMatch) {
-                // If we found a semantic match (same story, different source)
-                // We SKIP the expensive AI call and inherit the analysis stats
-                logger.info(`[Pipeline] 🧬 Inheriting Analysis from ${existingMatch.id}`);
-                isInherited = true;
-                
-                analysis = {
-                    biasScore: existingMatch.biasScore,
-                    credibilityScore: existingMatch.credibilityScore,
-                    reliabilityScore: existingMatch.reliabilityScore,
-                    trustScore: existingMatch.trustScore,
-                    politicalLean: existingMatch.politicalLean,
-                    sentiment: existingMatch.sentiment,
-                    analysisType: existingMatch.analysisType,
-                    clusterId: existingMatch.clusterId,
-                    clusterTopic: existingMatch.clusterTopic,
-                    // We retain the new article's summary/headline, only inherit metrics
-                    keyFindings: existingMatch.keyFindings,
-                    recommendations: existingMatch.recommendations
-                };
+            if (success) {
+                return { status: 'completed', articleId: urlHash };
             } else {
-                // FRESH AI ANALYSIS
-                analysis = await aiService.analyzeArticle(articleData, gatekeeperResult.recommendedModel);
-                
-                // Assign Cluster
-                analysis.clusterId = await clusteringService.assignClusterId(articleData, embedding || undefined);
+                return { status: 'skipped' }; // Duplicate or Filtered
             }
-
-            // 7. Save to Database (Prisma)
-            const savedArticle = await prisma.article.create({
-                data: {
-                    ...articleData,
-                    ...analysis,
-                    embedding: embedding || [],
-                    analysisVersion: isInherited ? '3.8-Inherited' : '3.8-Full',
-                    isLatest: true
-                }
-            });
-
-            // 8. Update Redis Locks (Prevent re-processing)
-            await redis.set(`processed:${rawArticle.url}`, '1', 172800); // 48h
-            const slug = articleData.headline.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
-            await redis.set(`processed_title:${slug}`, '1', 172800);
-
-            // Invalidate Feed Cache
-            await redis.del('feed:default'); // Simple invalidation
-
-            logger.info(`✅ [Pipeline] Saved ${savedArticle.id} (${Date.now() - startTime}ms)`);
-
-            return { status: isInherited ? 'SAVED_INHERITED' : 'SAVED_FRESH', id: savedArticle.id };
 
         } catch (error: any) {
-            logger.error(`❌ [Pipeline] Error: ${error.message}`);
-            // Don't throw if it's a known error, just return fail status
-            if (error.code === 'P2002') return { status: 'DUPLICATE_DB' }; // Unique constraint
-            throw new AppError(`Pipeline Failed: ${error.message}`, 500);
+            logger.error(`Pipeline Error processing ${data.url}: ${error.message}`);
+            throw error; // Let BullMQ handle retry
         }
     }
 }
