@@ -36,7 +36,7 @@ model Article {
   // -- Scores --
   biasScore            Float    @default(0)
   biasLabel            String?
-  biasComponents       Json?    // Dynamic structure preserved as Json
+  biasComponents       Json?    // Mixed type in Mongoose -> Json in Prisma
   
   credibilityScore     Float    @default(0)
   credibilityGrade     String?
@@ -107,12 +107,12 @@ model Narrative {
   // -- Deep Analysis --
   consensusPoints  String[]
   
-  // STRICT TYPING RESTORED: Uses Composite Type instead of generic Json
+  // Uses Composite Type
   divergencePoints DivergencePoint[]
 
   category         String?
   country          String?
-  
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -127,7 +127,7 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique // Auth ID (Firebase)
   
-  // Sparse Indexes: MongoDB allows multiple nulls if strictly typed as optional
+  // Sparse Indexes: MongoDB allows multiple nulls if strictly typed as optional/unique
   email                 String?  @unique
   phoneNumber           String?  @unique
   
@@ -171,11 +171,11 @@ model UserStats {
   totalTimeSpent        Int      @default(0) // Seconds
   averageAttentionSpan  Int      @default(0) // Seconds
   
-  // STRICT TYPING RESTORED: The "Echo Chamber" Meter
+  // The "Echo Chamber" Meter
   leanExposure          LeanExposure? 
   
   // Topic Velocity: Dynamic keys require Json (Map<String, Number>)
-  topicInterest         Json? 
+  topicInterest         Json?
   
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
@@ -192,24 +192,25 @@ model ActivityLog {
   user      Profile  @relation(fields: [userId], references: [userId])
   userId    String   
   
-  article   Article? @relation(fields: [articleId], references: [id])
-  articleId String?  @db.ObjectId
+  // Mongoose says required: true. Linking strictly to Article.
+  article   Article  @relation(fields: [articleId], references: [id])
+  articleId String   @db.ObjectId
   
   action    ActionType @default(view_analysis)
   timestamp DateTime   @default(now())
 
   // Indexes for Stats Queries
   @@index([userId, timestamp(sort: Desc)])
+  @@index([userId, action, timestamp(sort: Desc)])
   
   // NOTE: TTL Index (expireAfterSeconds) must be set manually in MongoDB
   @@map("activitylogs")
 }
 
 // ==========================================
-// 3. SYSTEM & AI CONFIG
+// 3. SYSTEM, AI CONFIG & CACHE
 // ==========================================
 
-// MISSING MODEL RESTORED: AI Prompts
 model Prompt {
   id          String     @id @default(auto()) @map("_id") @db.ObjectId
   type        PromptType @unique
@@ -217,7 +218,6 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
-  
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -248,6 +248,17 @@ model EmergencyContact {
   updatedAt   DateTime @updatedAt
 
   @@map("emergencycontacts")
+}
+
+// RESTORED: Cache Model from models/cacheModel.ts
+model Cache {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
+  data        Json
+  expiresAt   DateTime // Use with TTL index in Mongo
+  createdAt   DateTime @default(now())
+
+  @@map("cache")
 }
 
 // ==========================================
