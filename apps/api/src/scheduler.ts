@@ -1,26 +1,43 @@
 // apps/api/src/scheduler.ts
-import { newsQueue } from './jobs/queue';
+import cron from "node-cron";
+import { articleProcessor } from "./services/articleProcessor";
+import { clusterService } from "./services/clustering"; // We will build this next
 
-export async function initScheduler() {
-  console.log('⏰ Initializing Scheduler...');
+/**
+ * Initializes all background jobs.
+ */
+export const initScheduler = () => {
+  console.log("⏰ Scheduler Initialized...");
 
-  // Clean up old repeatable jobs to prevents duplicates on deployment
-  const repeatableJobs = await newsQueue.getRepeatableJobs();
-  for (const job of repeatableJobs) {
-    await newsQueue.removeRepeatableByKey(job.key);
-  }
-
-  // Add the Master Cron Job
-  // This job triggers the "Fetch" phase every hour
-  await newsQueue.add(
-    'fetch-latest-news',
-    {}, 
-    {
-      repeat: {
-        every: 60 * 60 * 1000, // 1 Hour
-      },
+  // 1. NEWS INGESTION (Every 30 minutes)
+  // Staggered to avoid rate limits
+  cron.schedule("*/30 * * * *", async () => {
+    try {
+      await articleProcessor.runIngestionPipeline("politics");
+      await new Promise(r => setTimeout(r, 5000)); // 5s delay
+      await articleProcessor.runIngestionPipeline("technology");
+    } catch (e) {
+      console.error("Job Error (Ingestion):", e);
     }
-  );
+  });
 
-  console.log('✅ Scheduler Active: Fetching news every 1 hour.');
-}
+  // 2. GENERAL NEWS (Hourly)
+  cron.schedule("0 * * * *", async () => {
+    try {
+      await articleProcessor.runIngestionPipeline("general");
+    } catch (e) {
+      console.error("Job Error (General):", e);
+    }
+  });
+
+  // 3. CLUSTERING / NARRATIVE FORMATION (Every 2 hours)
+  // Groups new articles into "Narratives"
+  cron.schedule("0 */2 * * *", async () => {
+    try {
+        console.log("Running Clustering...");
+        // await clusterService.groupArticles(); // To be implemented in next step
+    } catch (e) {
+        console.error("Job Error (Clustering):", e);
+    }
+  });
+};
