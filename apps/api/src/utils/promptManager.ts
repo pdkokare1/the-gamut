@@ -4,7 +4,7 @@ import { PromptType } from '@prisma/client';
 import redisHelper from './redis';
 import { logger } from './logger';
 
-// --- RICH DEFAULT PROMPTS (Fallback if DB/Redis fails) ---
+// --- RICH DEFAULT PROMPTS (Fallback) ---
 
 const AI_PERSONALITY = {
     LENGTH_INSTRUCTION: "Minimum 50 words and Maximum 60 words", 
@@ -118,10 +118,12 @@ Respond ONLY in valid JSON:
 }
 `;
 
+// Helper type to handle the special 'SUMMARY_ONLY' case without using @ts-ignore
+type ExtendedPromptType = PromptType | 'SUMMARY_ONLY';
+
 class PromptManager {
     
-    // Updated to use the PromptType enum from Prisma
-    async getTemplate(type: PromptType | 'SUMMARY_ONLY' = PromptType.ANALYSIS): Promise<string> {
+    async getTemplate(type: ExtendedPromptType = PromptType.ANALYSIS): Promise<string> {
         // Hardcoded bypass for the basic summary prompt
         if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
 
@@ -154,9 +156,8 @@ class PromptManager {
     }
 
     public async getAnalysisPrompt(article: any, mode: 'Full' | 'Basic' = 'Full'): Promise<string> {
-        const templateType = mode === 'Basic' ? 'SUMMARY_ONLY' : PromptType.ANALYSIS;
+        const templateType: ExtendedPromptType = mode === 'Basic' ? 'SUMMARY_ONLY' : PromptType.ANALYSIS;
         
-        // @ts-ignore - 'SUMMARY_ONLY' is handled specially above
         const template = await this.getTemplate(templateType);
         
         const articleContent = article.summary || article.content || "";
