@@ -1,7 +1,11 @@
 // apps/api/src/services/feed-service.ts
-import { prisma } from "../utils/prisma"; // Assumes you have a prisma instance exported
-import { Prisma } from "@prisma/client";
+import { prisma } from '@gamut/db';
+import { Prisma } from '@prisma/client';
+import { TRPCError } from '@trpc/server';
+import { redis } from '../utils/redis'; // Assuming you have a redis utility
+import { aiService } from './ai'; // Assuming this exists for embeddings
 
+// Types
 interface FeedFilters {
   limit: number;
   cursor?: string | null;
@@ -11,181 +15,258 @@ interface FeedFilters {
   topic?: string;
 }
 
-export const feedService = {
-  /**
-   * 1. MAIN FEED ALGORITHM
-   * Applies filters, handles infinite scroll, and ensures only latest versions are shown.
-   */
-  async getWeightedFeed(filters: FeedFilters, userProfile: any) {
-    const { limit, cursor, category, politicalLean, country, topic } = filters;
+// Helper: Cosine Similarity
+const calculateSimilarity = (vecA: number[], vecB: number[]) => {
+    if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < vecA.length; i++) {
+        dotProduct += vecA[i] * vecB[i];
+        normA += vecA[i] * vecA[i];
+        normB += vecB[i] * vecB[i];
+    }
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+};
 
+export const feedService = {
+  
+  // =================================================================
+  // 1. MAIN FEED (Weighted & Personalized)
+  // =================================================================
+  async getWeightedFeed(filters: FeedFilters, userProfile?: any) {
+    const { limit, cursor, category, politicalLean, topic } = filters;
+
+    // 1. Build Base Query
     const where: Prisma.ArticleWhereInput = {
-      isLatest: true, // Only show latest version
+       publishedAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) } // Last 48h default
     };
+
+    if (cursor) {
+        where.id = { lt: cursor }; // Pagination (Cursor based)
+    }
 
     if (category) where.category = category;
     if (politicalLean) where.politicalLean = politicalLean;
-    if (country && country !== "Global") where.country = country;
-    if (topic) where.clusterTopic = { contains: topic, mode: "insensitive" };
-
-    // Fetch articles
-    const articles = await prisma.article.findMany({
-      take: limit + 1, // Fetch one extra to determine next cursor
-      cursor: cursor ? { id: cursor } : undefined,
-      where,
-      orderBy: { publishedAt: "desc" },
-      select: {
-        id: true,
-        headline: true,
-        summary: true,
-        source: true,
-        category: true,
-        politicalLean: true,
-        imageUrl: true,
-        audioUrl: true,
-        publishedAt: true,
-        trustScore: true,
-        biasScore: true,
-        coverageLeft: true,
-        coverageCenter: true,
-        coverageRight: true,
-        clusterTopic: true,
-      }
-    });
-
-    return articles;
-  },
-
-  /**
-   * 2. IN FOCUS (NARRATIVES)
-   * Fetches top-level narratives that group multiple articles.
-   */
-  async getInFocusNarratives(limit: number) {
-    return await prisma.narrative.findMany({
-      take: limit,
-      orderBy: { lastUpdated: "desc" },
-      select: {
-        id: true,
-        masterHeadline: true,
-        executiveSummary: true,
-        clusterId: true,
-        sourceCount: true,
-        category: true,
-        lastUpdated: true,
-      }
-    });
-  },
-
-  /**
-   * 3. BALANCED FEED
-   * Finds articles that challenge the user's dominant political exposure.
-   */
-  async getBalancedFeed(userProfile: any, limit: number) {
-    // 1. Determine User's "Bubble"
-    const exposure = userProfile.leanExposure as { Left: number, Center: number, Right: number } || { Left: 0, Center: 0, Right: 0 };
     
-    let targetLean = "Center";
-    if (exposure.Left > exposure.Right + 20) targetLean = "Right"; // User is heavy Left -> Show Right
-    else if (exposure.Right > exposure.Left + 20) targetLean = "Left"; // User is heavy Right -> Show Left
+    // InFocus Topic Filter (Regex-like search)
+    if (topic) {
+         const cleanTopic = topic.replace(/[^\w\s]/g, '').replace(/\s+/g, '.*');
+         where.OR = [
+             { clusterTopic: { equals: topic, mode: 'insensitive' } },
+             { clusterTopic: { contains: cleanTopic, mode: 'insensitive' } }
+         ];
+         // Remove 48h limit for specific topics to show full history
+         delete where.publishedAt;
+    }
 
-    // 2. Fetch High Trust articles from the opposite side
-    return await prisma.article.findMany({
-      where: {
-        politicalLean: targetLean,
-        trustScore: { gt: 75 }, // Quality filter
-        isLatest: true
-      },
-      take: limit,
-      orderBy: { publishedAt: "desc" }
+    // 2. Fetch Candidates (Fetch more than limit to allow re-ranking)
+    const candidates = await prisma.article.findMany({
+        where,
+        take: 80, 
+        orderBy: { publishedAt: 'desc' },
+        include: {
+            // Only fetch strictly necessary fields for feed
+            // We avoid fetching 'content' to save bandwidth
+            savedByProfiles: userProfile ? { where: { id: userProfile.id } } : false
+        }
     });
+
+    // 3. Scoring Logic (Re-implementation of Narrative's weighting)
+    const scoredCandidates = candidates.map((article) => {
+        let score = 0;
+        
+        // A. Recency Score
+        const hoursOld = (Date.now() - new Date(article.publishedAt).getTime()) / (1000 * 60 * 60);
+        score += Math.max(0, 40 - (hoursOld * 1.5));
+
+        // B. Quality Modifiers
+        if (article.trustScore > 85) score += 10;
+        if (article.biasScore < 15) score += 5; 
+        if (article.isLatest) score += 10; // Prefer latest version of a story
+
+        // C. Personalization (Vector Similarity)
+        if (userProfile?.userEmbedding && article.embedding.length > 0) {
+            const sim = calculateSimilarity(userProfile.userEmbedding, article.embedding);
+            score += Math.max(0, (sim - 0.5) * 100); 
+        }
+
+        return { article, score };
+    });
+
+    // 4. Sort & Zone
+    const sorted = scoredCandidates.sort((a, b) => b.score - a.score);
+
+    // Zone 1: Top 10 High Score
+    const zone1 = sorted.slice(0, 10).map(i => i.article);
+    
+    // Zone 2: Discovery (Randomized from next 20)
+    const zone2Candidates = sorted.slice(10, 30);
+    const zone2 = zone2Candidates
+        .map(i => i.article)
+        .sort(() => Math.random() - 0.5);
+
+    const merged = [...zone1, ...zone2].slice(0, limit);
+
+    return merged.map(article => ({
+        ...article,
+        isSaved: userProfile ? article.savedByProfiles.length > 0 : false
+    }));
   },
 
-  /**
-   * 4. SMART SEARCH (Atlas + Prisma Fallback)
-   * Replicates the static `smartSearch` method from Mongoose.
-   */
-  async smartSearch(term: string) {
-    try {
-      // Try MongoDB Atlas Search (Requires 'default' index on Atlas)
-      // We use aggregateRaw because Prisma doesn't natively support $search
-      const results = await prisma.article.aggregateRaw({
-        pipeline: [
-          {
-            $search: {
-              index: "default",
-              text: {
-                query: term,
-                path: { wildcard: "*" },
-                fuzzy: {}
-              }
-            }
+  // =================================================================
+  // 2. IN FOCUS (Narratives)
+  // =================================================================
+  async getInFocusNarratives(limit: number) {
+      // Fetch Narratives directly
+      // Use "secondaryPreferred" logic if you had replicas, but Prisma handles this in connection string
+      const narratives = await prisma.narrative.findMany({
+          orderBy: { lastUpdated: 'desc' },
+          take: limit,
+          select: {
+              id: true,
+              masterHeadline: true,
+              clusterId: true,
+              lastUpdated: true,
+              sourceCount: true,
+              consensusPoints: true,
+              // No vector data
+          }
+      });
+      return narratives;
+  },
+
+  // =================================================================
+  // 3. BALANCED FEED (Anti-Echo Chamber)
+  // =================================================================
+  async getBalancedFeed(userProfile: any, limit: number) {
+      if (!userProfile) return [];
+
+      // Fetch User Stats to know their bias
+      const stats = await prisma.userStats.findUnique({
+          where: { userId: userProfile.userId }
+      });
+
+      let targetLean: string[] = [];
+      let reason = "Global Perspectives";
+
+      if (stats?.leanExposure) {
+          const { Left, Right, Center } = stats.leanExposure;
+          const total = Left + Right + Center;
+
+          if (total > 50) { // Only apply if we have enough data
+               if (Left > Right * 1.5) {
+                   targetLean = ['Right', 'Right-Leaning', 'Center'];
+                   reason = "Perspectives from Center & Right";
+               } else if (Right > Left * 1.5) {
+                   targetLean = ['Left', 'Left-Leaning', 'Center'];
+                   reason = "Perspectives from Center & Left";
+               }
+          }
+      }
+
+      if (targetLean.length === 0) return []; // No strong bias detected
+
+      const articles = await prisma.article.findMany({
+          where: {
+              politicalLean: { in: targetLean },
+              publishedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+              trustScore: { gte: 70 } // Only high trust for balanced feed
           },
-          { $limit: 20 },
-          {
-            $project: {
-              headline: 1, summary: 1, url: 1, imageUrl: 1,
-              source: 1, category: 1, publishedAt: 1,
-              id: { $toString: "$_id" } // Convert ObjectId to string for frontend
-            }
-          }
-        ]
+          orderBy: { trustScore: 'desc' },
+          take: limit
       });
-      
-      return results as unknown as any[];
-      
-    } catch (e) {
-      // Fallback: Standard Prisma Contains Search
-      console.warn("Atlas Search failed, using fallback regex.");
-      return await prisma.article.findMany({
-        where: {
-          OR: [
-            { headline: { contains: term, mode: "insensitive" } },
-            { summary: { contains: term, mode: "insensitive" } },
-            { clusterTopic: { contains: term, mode: "insensitive" } }
-          ]
-        },
-        take: 20,
-        orderBy: { publishedAt: "desc" }
-      });
-    }
+
+      return articles.map(a => ({ ...a, suggestionType: 'Challenge', reason }));
   },
 
-  /**
-   * 5. TOGGLE SAVE
-   * Handles adding/removing articles from profile.
-   */
+  // =================================================================
+  // 4. INTELLIGENT SEARCH (Vector + Fallback)
+  // =================================================================
+  async smartSearch(query: string) {
+     if (!query) return [];
+
+     // 1. Try Vector Search (Raw MongoDB Command via Prisma)
+     try {
+         const embedding = await aiService.createEmbedding(query);
+         
+         // Prisma doesn't support $vectorSearch natively yet in typed query
+         // We use runCommandRaw
+         if (embedding) {
+            const rawResult = await prisma.$runCommandRaw({
+                aggregate: "articles",
+                pipeline: [
+                    {
+                        "$vectorSearch": {
+                            "index": "vector_index",
+                            "path": "embedding",
+                            "queryVector": embedding,
+                            "numCandidates": 100,
+                            "limit": 20
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 1, "headline": 1, "summary": 1, "category": 1,
+                            "politicalLean": 1, "imageUrl": 1, "publishedAt": 1,
+                            "trustScore": 1
+                        }
+                    }
+                ],
+                cursor: {} 
+            });
+
+            // Parse Raw Result (MongoDB returns distinct structure)
+            const hits = (rawResult as any).cursor?.firstBatch || [];
+            if (hits.length > 0) return hits;
+         }
+     } catch (e) {
+         console.warn("Vector search failed, falling back to text:", e);
+     }
+
+     // 2. Fallback: Text Search (Regex/Index)
+     // Note: Atlas Search would be better here, but simple regex works for fallback
+     return await prisma.article.findMany({
+         where: {
+             OR: [
+                 { headline: { contains: query, mode: 'insensitive' } },
+                 { summary: { contains: query, mode: 'insensitive' } }
+             ]
+         },
+         take: 20,
+         orderBy: { publishedAt: 'desc' }
+     });
+  },
+
+  // =================================================================
+  // 5. TOGGLE SAVE
+  // =================================================================
   async toggleSaveArticle(userId: string, articleId: string) {
-    const profile = await prisma.profile.findUnique({
-      where: { userId },
-      select: { id: true, savedArticleIds: true }
-    });
-
-    if (!profile) throw new Error("Profile not found");
-
-    const isSaved = profile.savedArticleIds.includes(articleId);
-
-    if (isSaved) {
-      // Disconnect
-      await prisma.profile.update({
-        where: { userId },
-        data: {
-          savedArticles: {
-            disconnect: { id: articleId }
-          }
-        }
+      const profile = await prisma.profile.findUnique({
+          where: { userId },
+          include: { savedArticles: true }
       });
-      return { message: "Article removed from saved" };
-    } else {
-      // Connect
-      await prisma.profile.update({
-        where: { userId },
-        data: {
-          savedArticles: {
-            connect: { id: articleId }
-          }
-        }
-      });
-      return { message: "Article saved" };
-    }
+
+      if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Profile not found" });
+
+      const isSaved = profile.savedArticles.some(a => a.id === articleId);
+
+      if (isSaved) {
+          await prisma.profile.update({
+              where: { userId },
+              data: {
+                  savedArticles: { disconnect: { id: articleId } }
+              }
+          });
+          return { saved: false };
+      } else {
+          await prisma.profile.update({
+              where: { userId },
+              data: {
+                  savedArticles: { connect: { id: articleId } }
+              }
+          });
+          return { saved: true };
+      }
   }
 };
