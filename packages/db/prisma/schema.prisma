@@ -31,12 +31,12 @@ model Article {
   // -- AI Analysis --
   analysisType    AnalysisType @default(Full)
   sentiment       Sentiment    @default(Neutral)
-  analysisVersion String       @default("3.6") // Matched Mongoose Default
+  analysisVersion String       @default("3.6") 
   
-  // -- Scoring & Metrics --
+  // -- Scores --
   biasScore            Float    @default(0)
   biasLabel            String?
-  biasComponents       Json?    // Matches Mongoose "Mixed"
+  biasComponents       Json?    // Dynamic structure preserved as Json
   
   credibilityScore     Float    @default(0)
   credibilityGrade     String?
@@ -48,7 +48,7 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-
+  
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
@@ -74,19 +74,22 @@ model Article {
   updatedAt       DateTime @updatedAt
 
   // -- Relations --
+  // Many-to-Many relation with Profile (Saved Articles)
   savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id])
   savedByProfileIds String[]      @db.ObjectId
 
   activityLogs      ActivityLog[]
 
-  // -- Indexes (Ported from Mongoose) --
+  // -- Indexes --
+  // NOTE: MongoDB Text Indexes (weighted) must be created manually in Atlas.
+  // Mongoose: { headline: 'text', summary: 'text', weights: ... }
+  
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) // For You Feed
   @@index([politicalLean, trustScore, publishedAt(sort: Desc)])         // Trusted Feed
   @@index([clusterId, publishedAt(sort: Desc)])                         // Cluster View
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       // Regional News
   @@index([isLatest, publishedAt(sort: Desc)])
   
-  // Mapped to existing Mongoose collection
   @@map("articles")
 }
 
@@ -101,9 +104,11 @@ model Narrative {
   sourceCount      Int      @default(0)
   sources          String[]
   
-  // Stored as arrays/JSON in Prisma
+  // -- Deep Analysis --
   consensusPoints  String[]
-  divergencePoints Json[]   // Array of { point: string, perspectives: [...] }
+  
+  // STRICT TYPING RESTORED: Uses Composite Type instead of generic Json
+  divergencePoints DivergencePoint[]
 
   category         String?
   country          String?
@@ -111,7 +116,6 @@ model Narrative {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  // Mapped to existing Mongoose collection
   @@map("narratives")
 }
 
@@ -122,8 +126,11 @@ model Narrative {
 model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique // Auth ID (Firebase)
+  
+  // Sparse Indexes: MongoDB allows multiple nulls if strictly typed as optional
   email                 String?  @unique
   phoneNumber           String?  @unique
+  
   username              String   @unique
   
   // -- Stats --
@@ -154,7 +161,6 @@ model Profile {
   activityLogs          ActivityLog[]
   userStats             UserStats?
 
-  // Mapped to existing Mongoose collection
   @@map("profiles")
 }
 
@@ -162,22 +168,21 @@ model UserStats {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique
   
-  totalTimeSpent        Int      @default(0)
-  averageAttentionSpan  Int      @default(0)
+  totalTimeSpent        Int      @default(0) // Seconds
+  averageAttentionSpan  Int      @default(0) // Seconds
   
-  // The "Echo Chamber" Meter
-  leanExposure          Json?    // { Left: number, Center: number, Right: number }
+  // STRICT TYPING RESTORED: The "Echo Chamber" Meter
+  leanExposure          LeanExposure? 
   
-  // Topic Velocity
-  topicInterest         Json?    // Map<string, number>
+  // Topic Velocity: Dynamic keys require Json (Map<String, Number>)
+  topicInterest         Json? 
   
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
-  // Link to Profile (Optional/Loose in Mongo, Strict here via userId)
+  // Link to Profile
   user                  Profile  @relation(fields: [userId], references: [userId])
 
-  // Mapped to existing Mongoose collection
   @@map("userstats") 
 }
 
@@ -193,23 +198,38 @@ model ActivityLog {
   action    ActionType @default(view_analysis)
   timestamp DateTime   @default(now())
 
+  // Indexes for Stats Queries
   @@index([userId, timestamp(sort: Desc)])
   
-  // Mapped to existing Mongoose collection
+  // NOTE: TTL Index (expireAfterSeconds) must be set manually in MongoDB
   @@map("activitylogs")
 }
 
 // ==========================================
-// 3. SYSTEM & UTILITIES
+// 3. SYSTEM & AI CONFIG
 // ==========================================
+
+// MISSING MODEL RESTORED: AI Prompts
+model Prompt {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  type        PromptType @unique
+  text        String
+  version     Int        @default(1)
+  active      Boolean    @default(true)
+  description String?
+  
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@map("prompts")
+}
 
 model SystemConfig {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
-  value       String[] // Fixed: Mongoose was strict [String], not Json
+  value       String[] 
   lastUpdated DateTime @default(now())
 
-  // Mapped to existing Mongoose collection
   @@map("systemconfigs")
 }
 
@@ -227,7 +247,6 @@ model EmergencyContact {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Mapped to existing Mongoose collection
   @@map("emergencycontacts")
 }
 
@@ -235,12 +254,38 @@ model EmergencyContact {
 // 4. TYPES & ENUMS
 // ==========================================
 
+// Composite Types (MongoDB specific features)
+
 type Badge {
   id          String
   label       String
   icon        String
   description String
   earnedAt    DateTime @default(now())
+}
+
+type LeanExposure {
+  Left   Float @default(0)
+  Center Float @default(0)
+  Right  Float @default(0)
+}
+
+type DivergencePoint {
+  point        String
+  perspectives Perspective[]
+}
+
+type Perspective {
+  source String
+  stance String
+}
+
+// Enums
+
+enum PromptType {
+  ANALYSIS
+  GATEKEEPER
+  ENTITY_EXTRACTION
 }
 
 enum AnalysisType {
