@@ -99,8 +99,7 @@ class ClusteringService {
 
             // Threshold: 80% similarity
             if (bestScore > 0.80 && bestMatch) {
-                // Convert Mongo _id back to Prisma string id if needed, 
-                // but we mainly need cluster details here.
+                // Return best match for metadata usage
                 return bestMatch;
             }
 
@@ -157,7 +156,6 @@ class ClusteringService {
             }
         } catch (error) { 
             // Often occurs if index isn't ready or embedding dim mismatch
-            // logger.warn("Vector search duplicate check failed (ignoring)"); 
         }
         
         return null;
@@ -228,11 +226,9 @@ class ClusteringService {
         if (finalClusterId === 0) {
             try {
                 // Use Redis Atomic Increment for safe ID generation
-                // Assuming `redis` is an ioredis instance or compatible wrapper
                 const newId = await redis.incr('GLOBAL_CLUSTER_ID');
                 
-                // Safety check: If Redis was flushed, we might get a low ID.
-                // Sync with DB to be safe.
+                // Safety check for low IDs (in case of Redis flush)
                 if (newId < 100) {
                     const maxIdDoc = await prisma.article.findFirst({
                         orderBy: { clusterId: 'desc' },
@@ -256,7 +252,6 @@ class ClusteringService {
         }
 
         // --- NEW: Trigger Narrative Check (Fire and Forget) ---
-        // We delay slightly to allow the caller to save the current article first
         setTimeout(() => {
              this.processClusterForNarrative(finalClusterId).catch(err => {
                  logger.warn(`Background Narrative Gen Error for Cluster ${finalClusterId}: ${err.message}`);
@@ -274,14 +269,13 @@ class ClusteringService {
         if (!clusterId || clusterId === 0) return;
 
         try {
-            // Find all articles in this cluster, sorted by newest first
             const articles = await prisma.article.findMany({
                 where: { clusterId },
                 orderBy: { publishedAt: 'desc' },
                 select: { id: true, publishedAt: true }
             });
 
-            if (articles.length <= 1) return; // Nothing to optimize
+            if (articles.length <= 1) return; 
 
             // The first one is the winner (latest)
             const latestId = articles[0].id;
@@ -324,19 +318,18 @@ class ClusteringService {
         const articles = await prisma.article.findMany({
             where: { clusterId },
             orderBy: { publishedAt: 'desc' },
-            take: 10 // Analyze max 10 top articles
+            take: 10 
         });
 
         // 3. Threshold: Need 3 or more distinct sources to form a narrative
-        if (articles.length < 3) return; // Count check
+        if (articles.length < 3) return; 
 
         const distinctSources = new Set(articles.map(a => a.source));
-        if (distinctSources.size < 3) return; // Strict source uniqueness check
+        if (distinctSources.size < 3) return; 
 
         logger.info(`🧠 Triggering Narrative Synthesis for Cluster ${clusterId} (${articles.length} articles, ${distinctSources.size} sources)...`);
 
         // 4. Generate Narrative using AI Service
-        // The aiService generates the structure matching Narrative model
         const narrativeData = await aiService.generateNarrative(articles);
 
         if (narrativeData) {
@@ -349,8 +342,8 @@ class ClusteringService {
                     masterHeadline: narrativeData.masterHeadline,
                     executiveSummary: narrativeData.executiveSummary,
                     consensusPoints: narrativeData.consensusPoints,
-                    // Note: Prisma schema must support these composite types
-                    divergencePoints: narrativeData.divergencePoints, 
+                    // Note: Prisma schema must support these composite types as Json or specific types
+                    divergencePoints: narrativeData.divergencePoints as any, 
                     sourceCount: articles.length,
                     sources: Array.from(distinctSources),
                     category: articles[0].category,
@@ -361,7 +354,7 @@ class ClusteringService {
                     masterHeadline: narrativeData.masterHeadline,
                     executiveSummary: narrativeData.executiveSummary,
                     consensusPoints: narrativeData.consensusPoints,
-                    divergencePoints: narrativeData.divergencePoints,
+                    divergencePoints: narrativeData.divergencePoints as any,
                     sourceCount: articles.length,
                     sources: Array.from(distinctSources)
                 }
