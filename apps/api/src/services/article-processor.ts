@@ -1,189 +1,134 @@
-// apps/api/src/services/article-processor.ts
-import { prisma } from '@gamut/db';
-import { logger } from '../utils/logger';
-import aiService from './ai';
-import clusteringService from './clustering';
-import gatekeeperService from './gatekeeper';
-import crypto from 'crypto';
+import { cleanText, formatHeadline, getSimilarityScore } from '../utils/helpers';
+import { TRUSTED_SOURCES, JUNK_KEYWORDS } from '../utils/constants';
 
-// CHANGE: Exported interface for external use
-export interface RawArticle {
+// Basic interface for incoming RSS/API items
+export interface INewsSourceArticle {
     title: string;
-    link: string;
-    description?: string;
+    description: string;
     content?: string;
-    pubDate?: string;
-    source?: { id?: string; name: string };
-    image_url?: string;
-    category?: string; // Optional input category
+    url: string;
+    image?: string;
+    publishedAt: Date | string;
+    source: {
+        name: string;
+        url: string;
+    };
+    author?: string;
+    category?: string;
+    country?: string;
 }
 
 class ArticleProcessor {
-
-    // =================================================================
-    // Main Batch Entry Point (Direct Call)
-    // =================================================================
-    async processBatch(rawArticles: RawArticle[]): Promise<{ added: number; failed: number }> {
-        let added = 0;
-        let failed = 0;
-
-        logger.info(`🏭 Processing Batch of ${rawArticles.length} articles...`);
-
-        for (const raw of rawArticles) {
-            try {
-                // No pre-computed embedding in direct batch mode
-                const result = await this.processSingleArticle(raw);
-                if (result) added++;
-                else failed++;
-            } catch (error: any) {
-                logger.error(`❌ Error processing ${raw.title?.substring(0, 30)}: ${error.message}`);
-                failed++;
-            }
-        }
-
-        return { added, failed };
-    }
-
-    // =================================================================
-    // Single Article Pipeline
-    // =================================================================
-    async processSingleArticle(raw: RawArticle, preComputedEmbedding?: number[]): Promise<boolean> {
-        
-        // --- Step 1: Normalization ---
-        const articleData = this.normalizeData(raw);
-        if (!articleData) return false;
-
-        // --- Step 2: Deduplication (Fast) ---
-        const existingHash = await prisma.article.findUnique({
-            where: { urlHash: articleData.urlHash }
+    
+    /**
+     * Main Pipeline: Clean -> Score -> Deduplicate (Fuzzy)
+     */
+    public processBatch(articles: INewsSourceArticle[]): INewsSourceArticle[] {
+        // 1. First pass: Scoring and Basic Cleaning
+        const scored = articles.map(a => {
+            const score = this.calculateScore(a);
+            return { article: a, score };
         });
-        if (existingHash) {
-            return false; 
+
+        // 2. Sort by Quality (Highest Score First)
+        scored.sort((a, b) => b.score - a.score);
+
+        const uniqueArticles: INewsSourceArticle[] = [];
+        const seenUrls = new Set<string>();
+        const seenTitles: string[] = [];
+
+        // 3. Selection Loop
+        for (const item of scored) {
+            const article = item.article;
+
+            // A. Quality Cutoff (RAISED BAR)
+            // Was -5, now 0. This ensures "Junk Keyword" (-20 penalty) items are always killed.
+            if (item.score < 0) continue;
+
+            // B. Text Cleanup
+            article.title = formatHeadline(article.title);
+            article.description = cleanText(article.description || "");
+
+            // C. Validation
+            if (!this.isValid(article)) continue;
+
+            // D. Deduplication (Exact URL)
+            if (seenUrls.has(article.url)) continue;
+
+            // E. Deduplication (Fuzzy Title)
+            if (this.isFuzzyDuplicate(article.title, seenTitles)) continue;
+
+            // Accepted!
+            seenUrls.add(article.url);
+            seenTitles.push(article.title);
+            uniqueArticles.push(article);
         }
 
-        // --- Step 3: Gatekeeper Filter ---
-        const gateCheck = await gatekeeperService.filter(articleData);
-        if (!gateCheck.pass) {
-            logger.debug(`🚫 Gatekeeper Blocked: ${articleData.headline} (${gateCheck.reason})`);
-            return false;
-        }
+        return uniqueArticles.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+    }
 
-        // --- Step 4: Embedding (Vector) ---
-        // Optimization: Use passed embedding if available
-        let embedding = preComputedEmbedding;
+    private calculateScore(a: INewsSourceArticle): number {
+        let score = 0;
+        const titleLower = (a.title || "").toLowerCase();
+        const sourceLower = (a.source.name || "").toLowerCase();
         
-        if (!embedding || embedding.length === 0) {
-             embedding = (await aiService.createEmbedding(
-                `${articleData.headline} ${articleData.description || ''}`
-            )) || undefined;
-        }
+        const isTrusted = TRUSTED_SOURCES.some(src => sourceLower.includes(src.toLowerCase()));
 
-        if (!embedding) {
-            logger.warn(`⚠️ No embedding generated for: ${articleData.headline} (Skipping Vector Checks)`);
-        }
-
-        // --- Step 5: Clustering ---
-        const clusterId = await clusteringService.assignClusterId(articleData, embedding);
-
-        // --- Step 6: AI Analysis (The "Brain") ---
-        let analysis: any = {};
-        try {
-            analysis = await aiService.analyzeArticle(articleData, 'gemini-1.5-flash', 'Full');
-        } catch (err) {
-            logger.warn(`AI Analysis failed, saving basic record: ${articleData.headline}`);
-            analysis = {
-                summary: articleData.description || "No summary available.",
-                category: articleData.category || "General",
-                sentiment: "Neutral",
-                politicalLean: "Not Applicable",
-                biasScore: 0,
-                trustScore: 50
-            };
-        }
-
-        // --- Step 7: Database Save (Prisma) ---
-        try {
-            await prisma.article.create({
-                data: {
-                    urlHash: articleData.urlHash,
-                    headline: articleData.headline,
-                    originalUrl: articleData.url,
-                    description: articleData.description,
-                    content: articleData.content || "",
-                    imageUrl: articleData.imageUrl,
-                    source: articleData.source,
-                    author: "Unknown",
-                    publishedAt: articleData.publishedAt,
-                    
-                    clusterId: clusterId,
-                    category: analysis.category || "General",
-                    country: analysis.country || "Global",
-                    language: "en",
-                    
-                    // @ts-ignore - Prisma needs raw vector support or specific typed client
-                    embedding: embedding ? embedding : [],
-
-                    summary: analysis.summary,
-                    sentiment: analysis.sentiment,
-                    biasScore: analysis.biasScore || 0,
-                    politicalLean: analysis.politicalLean || "Not Applicable",
-                    credibilityScore: analysis.credibilityScore || 0,
-                    reliabilityScore: analysis.reliabilityScore || 0,
-                    trustScore: analysis.trustScore || 0,
-                    
-                    keyFindings: analysis.keyFindings || [],
-                    recommendations: analysis.recommendations || [],
-                    biasComponents: analysis.biasComponents || {},
-                    credibilityComponents: analysis.credibilityComponents || {},
-                    
-                    isLatest: true 
-                }
-            });
-
-            if (clusterId > 0) {
-                clusteringService.optimizeClusterFeed(clusterId).catch(console.error);
+        // Image Quality
+        // STRICT: If not trusted and no image, massive penalty.
+        if (a.image && a.image.startsWith('http')) {
+            score += 2;
+        } else {
+            if (!isTrusted) {
+                score -= 10; 
+            } else {
+                 // Trusted sources sometimes miss images but content is gold.
+                 score -= 2;
             }
-
-            return true;
-
-        } catch (dbError: any) {
-            if (dbError.code === 'P2002') return false;
-            logger.error(`Database Save Error: ${dbError.message}`);
-            return false;
-        }
-    }
-
-    // =================================================================
-    // Helpers
-    // =================================================================
-    private normalizeData(raw: RawArticle) {
-        if (!raw.link || !raw.title) return null;
-
-        const url = raw.link.trim();
-        const urlHash = crypto.createHash('sha256').update(url).digest('hex');
-
-        let publishedAt = new Date();
-        if (raw.pubDate) {
-            const parsed = new Date(raw.pubDate);
-            if (!isNaN(parsed.getTime())) publishedAt = parsed;
         }
 
-        return {
-            url,
-            urlHash,
-            headline: this.cleanText(raw.title),
-            description: this.cleanText(raw.description || ""),
-            content: this.cleanText(raw.content || ""),
-            imageUrl: raw.image_url || "",
-            source: raw.source?.name || "Unknown Source",
-            publishedAt,
-            category: raw.category || "General"
-        };
+        // Title Length
+        if (a.title && a.title.length > 40) score += 1;
+
+        // Trusted Source Bonus
+        if (isTrusted) score += 5; 
+
+        // Junk/Clickbait/Lifestyle Penalty (The Trap)
+        if (JUNK_KEYWORDS.some(word => titleLower.includes(word))) score -= 20;
+
+        return score;
     }
 
-    private cleanText(text: string): string {
-        if (!text) return "";
-        return text.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+    private isValid(article: INewsSourceArticle): boolean {
+        if (!article.title || !article.url) return false;
+        
+        // Increased min length to filter out "ticker" updates
+        if (article.title.length < 20) return false; 
+        
+        if (article.title === "No Title") return false;
+        if (!article.description || article.description.length < 30) return false; 
+        
+        // NEW: Word Count Check (prevent "Garbage In")
+        // If the article is too short (Title + Desc < 40 words), AI can't summarize it to 50 words.
+        const totalWords = (article.title + " " + article.description).split(/\s+/).length;
+        if (totalWords < 40) return false;
+
+        return true;
+    }
+
+    private isFuzzyDuplicate(currentTitle: string, existingTitles: string[]): boolean {
+        const currentLen = currentTitle.length;
+        
+        for (const existing of existingTitles) {
+            if (Math.abs(currentLen - existing.length) > 20) {
+                continue;
+            }
+            const score = getSimilarityScore(currentTitle, existing);
+            if (score > 0.8) {
+                return true; 
+            }
+        }
+        return false;
     }
 }
 
