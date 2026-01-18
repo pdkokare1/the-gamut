@@ -21,7 +21,7 @@ interface RawArticle {
 class ArticleProcessor {
 
     // =================================================================
-    // Main Batch Entry Point
+    // Main Batch Entry Point (Direct Call)
     // =================================================================
     async processBatch(rawArticles: RawArticle[]): Promise<{ added: number; failed: number }> {
         let added = 0;
@@ -29,10 +29,9 @@ class ArticleProcessor {
 
         logger.info(`🏭 Processing Batch of ${rawArticles.length} articles...`);
 
-        // Process strictly sequentially to manage AI Rate Limits
-        // (In a real worker environment, we might parallelize this slightly, e.g., Promise.all of size 3)
         for (const raw of rawArticles) {
             try {
+                // No pre-computed embedding in direct batch mode
                 const result = await this.processSingleArticle(raw);
                 if (result) added++;
                 else failed++;
@@ -48,19 +47,17 @@ class ArticleProcessor {
     // =================================================================
     // Single Article Pipeline
     // =================================================================
-    private async processSingleArticle(raw: RawArticle): Promise<boolean> {
+    async processSingleArticle(raw: RawArticle, preComputedEmbedding?: number[]): Promise<boolean> {
         
         // --- Step 1: Normalization ---
         const articleData = this.normalizeData(raw);
         if (!articleData) return false;
 
         // --- Step 2: Deduplication (Fast) ---
-        // Check URL Hash first
         const existingHash = await prisma.article.findUnique({
             where: { urlHash: articleData.urlHash }
         });
         if (existingHash) {
-            // Update timestamp if seen again? Usually ignore.
             return false; 
         }
 
@@ -72,26 +69,27 @@ class ArticleProcessor {
         }
 
         // --- Step 4: Embedding (Vector) ---
-        // We generate this *before* clustering because clustering relies on it.
-        const embedding = await aiService.createEmbedding(
-            `${articleData.headline} ${articleData.description || ''}`
-        );
+        // Optimization: Use passed embedding if available
+        let embedding = preComputedEmbedding;
+        
+        if (!embedding || embedding.length === 0) {
+             embedding = (await aiService.createEmbedding(
+                `${articleData.headline} ${articleData.description || ''}`
+            )) || undefined;
+        }
 
         if (!embedding) {
             logger.warn(`⚠️ No embedding generated for: ${articleData.headline} (Skipping Vector Checks)`);
         }
 
         // --- Step 5: Clustering ---
-        // Assigns a Cluster ID (Event Group)
-        const clusterId = await clusteringService.assignClusterId(articleData, embedding || undefined);
+        const clusterId = await clusteringService.assignClusterId(articleData, embedding);
 
         // --- Step 6: AI Analysis (The "Brain") ---
-        // We perform full analysis for the main DB record
         let analysis: any = {};
         try {
             analysis = await aiService.analyzeArticle(articleData, 'gemini-1.5-flash', 'Full');
         } catch (err) {
-            // Fallback: Save as "Basic" if AI fails, don't lose the data
             logger.warn(`AI Analysis failed, saving basic record: ${articleData.headline}`);
             analysis = {
                 summary: articleData.description || "No summary available.",
@@ -107,31 +105,24 @@ class ArticleProcessor {
         try {
             await prisma.article.create({
                 data: {
-                    // Unique IDs
                     urlHash: articleData.urlHash,
-                    
-                    // Core Data
                     headline: articleData.headline,
                     originalUrl: articleData.url,
                     description: articleData.description,
                     content: articleData.content || "",
                     imageUrl: articleData.imageUrl,
                     source: articleData.source,
-                    author: "Unknown", // Scrapers need to provide this if available
+                    author: "Unknown",
                     publishedAt: articleData.publishedAt,
                     
-                    // Logic / AI Data
                     clusterId: clusterId,
                     category: analysis.category || "General",
                     country: analysis.country || "Global",
                     language: "en",
                     
-                    // Vector Data
-                    // Note: Prisma schema must have Unsupported("vector(768)") or similar
-                    // If using MongoDB, it's just a float array
+                    // @ts-ignore - Prisma needs raw vector support or specific typed client
                     embedding: embedding ? embedding : [],
 
-                    // AI Analysis Results
                     summary: analysis.summary,
                     sentiment: analysis.sentiment,
                     biasScore: analysis.biasScore || 0,
@@ -140,30 +131,23 @@ class ArticleProcessor {
                     reliabilityScore: analysis.reliabilityScore || 0,
                     trustScore: analysis.trustScore || 0,
                     
-                    // JSON Fields (Complex Data)
                     keyFindings: analysis.keyFindings || [],
                     recommendations: analysis.recommendations || [],
                     biasComponents: analysis.biasComponents || {},
                     credibilityComponents: analysis.credibilityComponents || {},
                     
-                    // Meta
-                    isLatest: true // Will be fixed by clustering optimization later
+                    isLatest: true 
                 }
             });
 
-            // Trigger post-save optimization (background)
             if (clusterId > 0) {
-                // Ensure only one "latest" article per cluster
                 clusteringService.optimizeClusterFeed(clusterId).catch(console.error);
             }
 
             return true;
 
         } catch (dbError: any) {
-            if (dbError.code === 'P2002') {
-                // Unique constraint failed (race condition on URL hash)
-                return false;
-            }
+            if (dbError.code === 'P2002') return false;
             logger.error(`Database Save Error: ${dbError.message}`);
             return false;
         }
@@ -176,11 +160,8 @@ class ArticleProcessor {
         if (!raw.link || !raw.title) return null;
 
         const url = raw.link.trim();
-        
-        // Generate Hash for Deduplication
         const urlHash = crypto.createHash('sha256').update(url).digest('hex');
 
-        // Parse Date
         let publishedAt = new Date();
         if (raw.pubDate) {
             const parsed = new Date(raw.pubDate);
@@ -202,11 +183,7 @@ class ArticleProcessor {
 
     private cleanText(text: string): string {
         if (!text) return "";
-        return text
-            .replace(/<[^>]*>?/gm, '') // Strip HTML
-            .replace(/&nbsp;/g, ' ')
-            .replace(/\s+/g, ' ')      // Collapse whitespace
-            .trim();
+        return text.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
     }
 }
 
