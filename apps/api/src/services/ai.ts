@@ -1,4 +1,3 @@
-// apps/api/src/services/ai.ts
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import { logger } from '../utils/logger'; 
@@ -11,6 +10,7 @@ import promptManager from '../utils/promptManager';
 import { CONSTANTS } from '../utils/constants'; 
 
 // --- Validation Schemas (Zod) ---
+// These strictly match your old validationSchemas.ts but using Zod for runtime safety
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
