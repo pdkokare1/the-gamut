@@ -1,3 +1,4 @@
+// apps/api/src/services/ai.ts
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import { logger } from '../utils/logger'; 
@@ -10,7 +11,6 @@ import promptManager from '../utils/promptManager';
 import { CONSTANTS } from '../utils/constants'; 
 
 // --- Validation Schemas (Zod) ---
-// These strictly match your old validationSchemas.ts but using Zod for runtime safety
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
@@ -76,7 +76,7 @@ const NarrativeSchema = z.object({
 });
 
 // --- Constants ---
-const EMBEDDING_MODEL = CONSTANTS.AI_MODELS?.EMBEDDING || "text-embedding-004";
+const EMBEDDING_MODEL = CONSTANTS.AI_MODELS.EMBEDDING;
 const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
@@ -92,7 +92,7 @@ class AIService {
     } else {
         logger.warn("⚠️ No Gemini API Key found in config");
     }
-    logger.info(`🤖 AI Service Initialized (Default: ${CONSTANTS.AI_MODELS?.FAST || 'gemini-1.5-flash'})`);
+    logger.info(`🤖 AI Service Initialized (Default: ${CONSTANTS.AI_MODELS.FAST})`);
   }
 
   // --- Helpers ---
@@ -114,8 +114,8 @@ class AIService {
           clean = clean.replace(new RegExp(phrase, 'gi'), '');
       });
 
-      // Limits: Pro = 1.5M, Flash = 800k (Safe margins)
-      const SAFE_LIMIT = isProMode ? 1500000 : 800000;
+      // Limits: Pro = 2M, Flash = 1M (Based on Constants)
+      const SAFE_LIMIT = isProMode ? CONSTANTS.AI_LIMITS.MAX_TOKENS_PRO : CONSTANTS.AI_LIMITS.MAX_TOKENS_FLASH;
 
       if (clean.length > SAFE_LIMIT) {
           logger.warn(`⚠️ Article extremely large (${clean.length} chars). Truncating to ${SAFE_LIMIT}.`);
@@ -141,7 +141,7 @@ class AIService {
 
   // --- Core Methods ---
 
-  async analyzeArticle(article: any, targetModel: string = CONSTANTS.AI_MODELS?.FAST || 'gemini-1.5-flash', mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
+  async analyzeArticle(article: any, targetModel: string = CONSTANTS.AI_MODELS.FAST, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
     if (!isSystemHealthy) {
         logger.warn('⚡ Circuit Breaker OPEN for Gemini. Using Fallback.');
@@ -156,7 +156,7 @@ class AIService {
     };
     
     // Safety check for empty content
-    if (!optimizedArticle.summary || optimizedArticle.summary.length < 50) {
+    if (!optimizedArticle.summary || optimizedArticle.summary.length < CONSTANTS.AI_LIMITS.MIN_CONTENT_CHARS) {
         return this.getFallbackAnalysis(article);
     }
 
@@ -173,7 +173,7 @@ class AIService {
                   temperature: 0.1, 
                   maxOutputTokens: 8192 
                 }
-            }, { timeout: 60000 });
+            }, { timeout: CONSTANTS.TIMEOUTS.AI_GENERATION });
             return response.data;
         });
 
@@ -191,7 +191,7 @@ class AIService {
       if (!articles || articles.length < 2) return null;
 
       try {
-          const targetModel = CONSTANTS.AI_MODELS?.QUALITY || 'gemini-1.5-pro';
+          const targetModel = CONSTANTS.AI_MODELS.QUALITY;
 
           let docContext = "";
           articles.forEach((art, index) => {
@@ -221,7 +221,7 @@ class AIService {
                   temperature: 0.2, 
                   maxOutputTokens: 8192
                 }
-              }, { timeout: 120000 }); 
+              }, { timeout: CONSTANTS.TIMEOUTS.NARRATIVE_GEN }); 
               return response.data;
           });
           
