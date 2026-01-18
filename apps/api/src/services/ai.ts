@@ -1,194 +1,90 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { jsonrepair } from 'jsonrepair';
-import { config } from '../config';
-import keyManager from '../utils/KeyManager';
-import circuitBreaker from '../utils/CircuitBreaker';
-import logger from '../utils/logger';
-import { BasicAnalysisSchema, FullAnalysisSchema, NarrativeSchema } from '../utils/validation';
+// apps/api/src/services/ai.ts
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import { env } from "../config"; // Ensure you have env variables exported here
 
-// Types
-type AnalysisMode = 'Full' | 'Basic';
+// Initialize Gemini
+const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
 
-const NEWS_SAFETY_SETTINGS = [
-    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
-    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
-];
+const MODEL_FAST = "gemini-2.0-flash-exp"; // Fast, cheap (for summaries/classification)
+const MODEL_SMART = "gemini-1.5-pro-latest"; // High reasoning (for bias/trust scores)
+const MODEL_EMBED = "text-embedding-004";
 
-class AIService {
-  
+// Define strict output schemas for JSON mode (Reliability 100%)
+const analysisSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    summary: { type: SchemaType.STRING },
+    politicalLean: { type: SchemaType.STRING, enum: ["Left", "Center", "Right"] },
+    sentiment: { type: SchemaType.STRING, enum: ["Positive", "Negative", "Neutral"] },
+    biasScore: { type: SchemaType.NUMBER },
+    trustScore: { type: SchemaType.NUMBER },
+    keyFindings: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+    primaryNoun: { type: SchemaType.STRING },
+    category: { type: SchemaType.STRING }
+  },
+  required: ["summary", "politicalLean", "biasScore", "trustScore", "keyFindings", "category"]
+};
+
+export const aiService = {
   /**
-   * Optimized Cleaner: Removes specific news junk to save tokens.
+   * Analyzes an article using Gemini Flash for speed and cost-efficiency.
+   * Returns structured JSON data ready for the database.
    */
-  private optimizeText(text: string, isPro: boolean = false): string {
-    let clean = text.replace(/<[^>]*>/g, ' '); // HTML
-    
-    // Remove common news clutter
-    const junkPhrases = [
-        "Subscribe to continue reading", "Read more", "Sign up for our newsletter",
-        "Follow us on", "© 2024", "All rights reserved", "Click here", 
-        "Advertisement", "Supported by"
-    ];
-    junkPhrases.forEach(phrase => {
-        clean = clean.replace(new RegExp(phrase, 'gi'), '');
-    });
-
-    clean = clean.replace(/\s+/g, ' ').trim();
-    
-    // Limits: Flash (700k chars), Pro (1.5M chars)
-    const limit = isPro ? 1000000 : 700000;
-    if (clean.length > limit) {
-      return clean.substring(0, limit) + "...(truncated)";
-    }
-    return clean;
-  }
-
-  /**
-   * Core Analysis Function
-   */
-  async analyzeArticle(text: string, headline: string, mode: AnalysisMode = 'Full') {
-    if (await circuitBreaker.isOpen('GEMINI')) return this.getFallbackAnalysis();
-
-    const modelName = config.aiModels.quality; 
-
+  async analyzeArticle(title: string, content: string, source: string) {
     try {
-      const schemaJson = mode === 'Basic' ? JSON.stringify(BasicAnalysisSchema) : JSON.stringify(FullAnalysisSchema);
-      const cleanText = this.optimizeText(text);
+      const model = genAI.getGenerativeModel({
+        model: MODEL_FAST,
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: analysisSchema,
+        },
+      });
 
       const prompt = `
-        You are an expert news analyst. Analyze the following article.
-        HEADLINE: ${headline}
-        TEXT: ${cleanText}
-        
-        OUTPUT REQUIREMENT:
-        Return ONLY valid JSON matching this schema:
-        ${schemaJson}
+        Analyze this news article. act as an objective editor.
+        Title: ${title}
+        Source: ${source}
+        Content Snippet: ${content.substring(0, 3000)}...
+
+        Tasks:
+        1. Summarize in 3 concise sentences.
+        2. Determine Political Lean (Left, Center, Right).
+        3. Calculate Bias Score (0-100, where 0 is neutral, 100 is propaganda).
+        4. Calculate Trust Score (0-100 based on facts vs opinion).
+        5. Extract 3-5 Key Findings (bullet points).
+        6. Identify the primary entity (Noun) for clustering.
+        7. Categorize (Politics, Tech, Business, Health, Science, Sports, Entertainment).
       `;
 
-      const result = await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ 
-          model: modelName,
-          safetySettings: NEWS_SAFETY_SETTINGS as any,
-          generationConfig: { responseMimeType: "application/json" }
-        });
-
-        const response = await model.generateContent(prompt);
-        return response.response.text();
-      });
-
-      const cleanJson = jsonrepair(result);
-      const parsed = JSON.parse(cleanJson);
+      const result = await model.generateContent(prompt);
+      const response = result.response.text();
       
-      if (mode === 'Basic') return BasicAnalysisSchema.parse(parsed);
-      return FullAnalysisSchema.parse(parsed);
-
-    } catch (error: any) {
-      logger.error(`AI Analysis Failed: ${error.message}`);
-      if (!error.issues) { // Only record failure if it's NOT a Zod validation error
-        await circuitBreaker.recordFailure('GEMINI');
-      }
-      return this.getFallbackAnalysis();
-    }
-  }
-
-  /**
-   * Narrative Generation
-   */
-  async generateNarrative(articles: { source: string, headline: string, summary: string }[]) {
-    if (articles.length < 2) return null;
-
-    try {
-      const prompt = `
-        Synthesize a Master Narrative from these ${articles.length} sources.
-        Focus on consensus facts vs divergence/spin.
-        Sources:
-        ${articles.map((a, i) => `[${i+1}] ${a.source}: ${a.headline} - ${a.summary}`).join('\n')}
-      `;
-
-      const result = await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ 
-          model: config.aiModels.pro, 
-          generationConfig: { responseMimeType: "application/json" }
-        });
-        const res = await model.generateContent(prompt);
-        return res.response.text();
-      });
-
-      return NarrativeSchema.parse(JSON.parse(jsonrepair(result)));
-    } catch (e) {
-      logger.error('Narrative Gen Failed', e);
-      return null;
-    }
-  }
-
-  /**
-   * Single Embedding
-   */
-  async createEmbedding(text: string): Promise<number[] | null> {
-    try {
-      const clean = this.optimizeText(text).substring(0, 9000);
-      
-      return await keyManager.executeWithRetry('GEMINI', async (apiKey) => {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: config.aiModels.embedding });
-        const res = await model.embedContent(clean);
-        return res.embedding.values;
-      });
-    } catch (e) {
-      logger.error('Embedding Failed', e);
-      return null;
-    }
-  }
-
-  /**
-   * Batch Embedding (Restored Feature)
-   * Essential for bulk-processing articles for vector search.
-   */
-  async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
-    if (!texts.length) return [];
-    if (await circuitBreaker.isOpen('GEMINI')) return null;
-
-    try {
-        const BATCH_SIZE = 50; // Gemini limit per request is often 100, playing safe
-        const allEmbeddings: number[][] = [];
-
-        // Process in chunks
-        for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-             const chunk = texts.slice(i, i + BATCH_SIZE);
-             
-             // We can't use the standard SDK for batching easily in all versions, 
-             // but we can map parallel promises with concurrency control if needed.
-             // For simplicity and reliability in this stack, we'll map them:
-             const chunkPromises = chunk.map(text => this.createEmbedding(text));
-             const chunkResults = await Promise.all(chunkPromises);
-             
-             chunkResults.forEach(res => {
-                 if (res) allEmbeddings.push(res);
-                 else allEmbeddings.push([]); // Keep index alignment
-             });
-        }
-        return allEmbeddings;
+      return JSON.parse(response);
     } catch (error) {
-        logger.error('Batch Embedding Failed', error);
-        return null;
+      console.error("AI Analysis Failed:", error);
+      // Fallback for failed analysis
+      return {
+        summary: "Analysis unavailable.",
+        politicalLean: "Center",
+        biasScore: 0,
+        trustScore: 50,
+        keyFindings: [],
+        category: "General"
+      };
+    }
+  },
+
+  /**
+   * Generates Vector Embeddings for Semantic Search / Clustering
+   */
+  async generateEmbedding(text: string): Promise<number[]> {
+    try {
+      const model = genAI.getGenerativeModel({ model: MODEL_EMBED });
+      const result = await model.embedContent(text.substring(0, 2048)); // Truncate for limit
+      return result.embedding.values;
+    } catch (error) {
+      console.error("Embedding Error:", error);
+      return []; // Return empty array on failure (non-blocking)
     }
   }
-
-  private getFallbackAnalysis() {
-    return {
-      summary: "Analysis currently unavailable.",
-      category: "General",
-      sentiment: "Neutral",
-      politicalLean: "Not Applicable",
-      biasScore: 0,
-      trustScore: 0,
-      trustLevel: "Unknown",
-      keyFindings: []
-    };
-  }
-}
-
-export const aiService = new AIService();
+};
