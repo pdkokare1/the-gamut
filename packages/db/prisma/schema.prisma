@@ -123,4 +123,140 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique // Auth ID (Firebase)
   email                 String?  @unique
-  phoneNumber
+  phoneNumber           String?  @unique
+  username              String   @unique
+  
+  // -- Stats --
+  articlesViewedCount    Int      @default(0)
+  comparisonsViewedCount Int      @default(0)
+  articlesSharedCount    Int      @default(0)
+  
+  // -- Gamification --
+  currentStreak         Int      @default(0)
+  lastActiveDate        DateTime @default(now())
+  badges                Badge[]
+  
+  // -- Saved Content --
+  savedArticles         Article[] @relation(fields: [savedArticleIds], references: [id])
+  savedArticleIds       String[]  @db.ObjectId
+  
+  // -- Personalization --
+  userEmbedding         Float[]
+  
+  // -- Notifications --
+  fcmToken              String?
+  notificationsEnabled  Boolean  @default(false)
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  
+  // Relations
+  activityLogs          ActivityLog[]
+  userStats             UserStats?
+
+  // Mapped to existing Mongoose collection
+  @@map("profiles")
+}
+
+model UserStats {
+  id                    String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId                String   @unique
+  
+  totalTimeSpent        Int      @default(0)
+  averageAttentionSpan  Int      @default(0)
+  
+  // The "Echo Chamber" Meter
+  leanExposure          Json?    // { Left: number, Center: number, Right: number }
+  
+  // Topic Velocity
+  topicInterest         Json?    // Map<string, number>
+  
+  engagementScore       Float    @default(50)
+  lastUpdated           DateTime @default(now())
+
+  // Link to Profile (Optional/Loose in Mongo, Strict here via userId)
+  user                  Profile  @relation(fields: [userId], references: [userId])
+
+  // Mapped to existing Mongoose collection
+  @@map("userstats") 
+}
+
+model ActivityLog {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  
+  user      Profile  @relation(fields: [userId], references: [userId])
+  userId    String   
+  
+  article   Article? @relation(fields: [articleId], references: [id])
+  articleId String?  @db.ObjectId
+  
+  action    ActionType @default(view_analysis)
+  timestamp DateTime   @default(now())
+
+  @@index([userId, timestamp(sort: Desc)])
+  
+  // Mapped to existing Mongoose collection
+  @@map("activitylogs")
+}
+
+// ==========================================
+// 3. SYSTEM & UTILITIES
+// ==========================================
+
+model SystemConfig {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
+  value       String[] // Fixed: Mongoose was strict [String], not Json
+  lastUpdated DateTime @default(now())
+
+  // Mapped to existing Mongoose collection
+  @@map("systemconfigs")
+}
+
+model EmergencyContact {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  category    String
+  serviceName String
+  description String?
+  number      String
+  scope       String   // e.g. "National", "Local"
+  hours       String   @default("24x7")
+  country     String   @default("India")
+  isGlobal    Boolean  @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Mapped to existing Mongoose collection
+  @@map("emergencycontacts")
+}
+
+// ==========================================
+// 4. TYPES & ENUMS
+// ==========================================
+
+type Badge {
+  id          String
+  label       String
+  icon        String
+  description String
+  earnedAt    DateTime @default(now())
+}
+
+enum AnalysisType {
+  Full
+  SentimentOnly
+}
+
+enum Sentiment {
+  Positive
+  Negative
+  Neutral
+}
+
+enum ActionType {
+  view_analysis
+  view_comparison
+  share_article
+  read_external
+}
