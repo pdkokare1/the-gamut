@@ -6,8 +6,8 @@ import clusteringService from './clustering';
 import gatekeeperService from './gatekeeper';
 import crypto from 'crypto';
 
-// Types matches the Raw Article Input from Scrapers
-interface RawArticle {
+// CHANGE: Exported interface for external use
+export interface RawArticle {
     title: string;
     link: string;
     description?: string;
