@@ -36,7 +36,7 @@ model Article {
   // -- Scoring & Metrics --
   biasScore            Float    @default(0)
   biasLabel            String?
-  biasComponents       Json?    // Flexible JSON to replace Mongoose Mixed
+  biasComponents       Json?    // Stores flexible bias breakdown
   
   credibilityScore     Float    @default(0)
   credibilityGrade     String?
@@ -48,7 +48,7 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-  
+
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
@@ -61,12 +61,11 @@ model Article {
   primaryNoun    String?
   secondaryNoun  String?
   
-  // [ADDED] Critical for feed optimization (hiding older versions)
+  // Feed Optimization: Hides older versions of stories
   isLatest       Boolean @default(true)
   
   // -- Vector Data --
-  // Note: Prisma does not support 'select: false'.
-  // We will exclude this field in API queries manually via select types.
+  // Note: We manually exclude this in select queries to save bandwidth
   embedding      Float[]
   
   keyFindings     String[]
@@ -81,13 +80,12 @@ model Article {
 
   activityLogs      ActivityLog[]
 
-  // -- Indexes --
-  // Note: Compound indexes in MongoDB/Prisma help query performance
-  @@index([category, politicalLean, publishedAt])
-  @@index([politicalLean, trustScore, publishedAt]) // Trusted News Feed
-  @@index([clusterId, publishedAt])                 // Cluster View
-  @@index([country, category, publishedAt])         // Regional News
-  @@index([isLatest, publishedAt])                  // [ADDED] Feed Optimization Index
+  // -- Indexes (Ported from Mongoose) --
+  @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) // For You Feed
+  @@index([politicalLean, trustScore, publishedAt(sort: Desc)])         // Trusted Feed
+  @@index([clusterId, publishedAt(sort: Desc)])                         // Cluster View
+  @@index([country, category, isLatest, publishedAt(sort: Desc)])       // Regional News
+  @@index([isLatest, publishedAt(sort: Desc)])
 }
 
 model Narrative {
@@ -101,16 +99,15 @@ model Narrative {
   sourceCount      Int      @default(0)
   sources          String[]
   
+  // Stored as simple arrays/JSON in Prisma for MongoDB
   consensusPoints  String[]
-  divergencePoints DivergencePoint[] // Uses Composite Type below
+  divergencePoints Json[]   // Array of { point: string, perspectives: [...] }
 
   category         String?
   country          String?
   
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
-  
-  // Note: Ensure TTL index { updatedAt: 1 }, { expireAfterSeconds: 1209600 } exists in Atlas
 }
 
 // ==========================================
@@ -121,10 +118,7 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique // Auth ID (Firebase)
   email                 String?  @unique
-  
-  // [ADDED] Required for Phone Auth users
   phoneNumber           String?  @unique
-  
   username              String   @unique
   
   // -- Stats --
@@ -132,6 +126,13 @@ model Profile {
   comparisonsViewedCount Int      @default(0)
   articlesSharedCount    Int      @default(0)
   
+  // -- User Stats (Merged from userStatsModel) --
+  // Stores { Left: number, Center: number, Right: number }
+  leanExposure          Json?    
+  // Stores { "Tech": number, "Politics": number }
+  topicInterest         Json?
+  engagementScore       Float    @default(50)
+
   // -- Gamification --
   currentStreak         Int      @default(0)
   lastActiveDate        DateTime @default(now())
@@ -167,23 +168,17 @@ model ActivityLog {
   timestamp DateTime   @default(now())
 
   @@index([userId, timestamp(sort: Desc)])
-  @@index([userId, action, timestamp(sort: Desc)])
 }
 
 // ==========================================
 // 3. SYSTEM & UTILITIES
 // ==========================================
 
-model Prompt {
-  id          String     @id @default(auto()) @map("_id") @db.ObjectId
-  type        PromptType @unique
-  text        String
-  version     Int        @default(1)
-  active      Boolean    @default(true)
-  description String?
-  
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+model SystemConfig {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
+  value       Json     // Supports typed configurations
+  lastUpdated DateTime @default(now())
 }
 
 model EmergencyContact {
@@ -192,7 +187,7 @@ model EmergencyContact {
   serviceName String
   description String?
   number      String
-  scope       String
+  scope       String   // e.g. "National", "Local"
   hours       String   @default("24x7")
   country     String   @default("India")
   isGlobal    Boolean  @default(false)
@@ -201,33 +196,10 @@ model EmergencyContact {
   updatedAt   DateTime @updatedAt
 }
 
-model SystemConfig {
-  id          String   @id @default(auto()) @map("_id") @db.ObjectId
-  key         String   @unique
-  
-  // [CHANGED] String[] -> Json to support complex configs (Booleans, Objects)
-  value       Json
-  
-  lastUpdated DateTime @default(now())
-}
-
-model Cache {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
-  key       String   @unique
-  data      Json
-  expiresAt DateTime
-  
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  
-  @@index([expiresAt])
-}
-
 // ==========================================
-// 4. TYPES & ENUMS (STRICT TYPING)
+// 4. TYPES & ENUMS
 // ==========================================
 
-// Composite Types (Embedded Documents)
 type Badge {
   id          String
   label       String
@@ -236,17 +208,6 @@ type Badge {
   earnedAt    DateTime @default(now())
 }
 
-type DivergencePoint {
-  point        String
-  perspectives Perspective[]
-}
-
-type Perspective {
-  source String
-  stance String
-}
-
-// Enums
 enum AnalysisType {
   Full
   SentimentOnly
@@ -263,10 +224,4 @@ enum ActionType {
   view_comparison
   share_article
   read_external
-}
-
-enum PromptType {
-  ANALYSIS
-  GATEKEEPER
-  ENTITY_EXTRACTION
 }
