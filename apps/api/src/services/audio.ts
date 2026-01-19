@@ -1,3 +1,4 @@
+// apps/api/src/services/audio.ts
 import { v2 as cloudinary } from 'cloudinary';
 import { config } from '../config';
 import { prisma } from '@gamut/db';
@@ -39,6 +40,8 @@ class AudioService {
 
     // 3. Punctuation for pacing
     clean = clean.replace(/[-—–]/g, " "); // Replace dashes with pauses
+    // RESTORED: Colon to pause conversion from old ttsService.ts
+    clean = clean.replace(/:/g, ". . "); 
     clean = clean.replace(/\s+/g, " ").trim();
 
     return clean;
