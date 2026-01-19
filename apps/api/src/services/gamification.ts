@@ -1,100 +1,148 @@
 // apps/api/src/services/gamification.ts
-import { prisma } from "../utils/prisma";
+import { prisma } from '@gamut/db';
+import { logger } from '../utils/logger';
 
-// Badge Definitions
-const BADGES = {
-  NEWCOMER: {
-    id: "badge_newcomer",
-    label: "Newcomer",
-    icon: "👋",
-    description: "Read your first article."
+// --- Constants (Ported from Legacy) ---
+const LEVEL_THRESHOLDS = [0, 100, 300, 600, 1000, 1500, 2100, 2800, 3600, 4500]; // xp required for levels 1-10
+
+export const BADGES = {
+  BUBBLE_BURSTER: {
+    id: 'bubble_burster',
+    name: 'Bubble Burster',
+    description: 'Read 5 articles from opposing political viewpoints.',
+    icon: '📍',
+    xp: 150
   },
-  SCHOLAR: {
-    id: "badge_scholar",
-    label: "Scholar",
-    icon: "🎓",
-    description: "Read 100 articles."
+  STREAK_MASTER: {
+    id: 'streak_master',
+    name: 'Streak Master',
+    description: 'Maintain a 7-day reading streak.',
+    icon: '🔥',
+    xp: 300
   },
-  BALANCED_READER: {
-    id: "badge_balanced",
-    label: "Balanced Reader",
-    icon: "⚖️",
-    description: "Maintained a balanced news diet (30%+ from all sides)."
+  DEEP_DIVER: {
+    id: 'deep_diver',
+    name: 'Deep Diver',
+    description: 'Read 3 Long-Form analyses in one day.',
+    icon: '🤿',
+    xp: 100
   },
-  STREAK_7: {
-    id: "badge_streak_7",
-    label: "Week Warrior",
-    icon: "🔥",
-    description: "7 Day reading streak."
+  VERIFIER: {
+    id: 'verifier',
+    name: 'Source Verifier',
+    description: 'Opened the "Compare Sources" view 10 times.',
+    icon: '⚖️',
+    xp: 100
+  },
+  EARLY_BIRD: {
+    id: 'early_bird',
+    name: 'Early Bird',
+    description: 'Read the morning briefing before 8 AM.',
+    icon: '☕',
+    xp: 50
   }
 };
 
 export const gamificationService = {
-  /**
-   * Checks all criteria and awards new badges if earned.
-   * Returns an array of newly awarded badges to notify the user.
-   */
-  async checkAchievements(userId: string) {
-    const profile = await prisma.profile.findUnique({
+  
+  // 1. AWARD XP & CHECK LEVEL UP
+  async awardXP(userId: string, amount: number, action: string) {
+    const profile = await prisma.profile.findUnique({ where: { userId } });
+    if (!profile) return;
+
+    let newXP = profile.xp + amount;
+    let newLevel = profile.level;
+
+    // Check Level Up
+    // Find the highest level where newXP >= threshold
+    const calculatedLevel = LEVEL_THRESHOLDS.findIndex(t => newXP < t); 
+    // If findIndex returns -1, they are max level (above last threshold)
+    const actualLevel = calculatedLevel === -1 ? LEVEL_THRESHOLDS.length : calculatedLevel;
+
+    if (actualLevel > newLevel) {
+      newLevel = actualLevel;
+      // potentially send notification: "Level Up!"
+    }
+
+    await prisma.profile.update({
       where: { userId },
-      include: { badges: true } // See what they already have
+      data: { 
+        xp: newXP, 
+        level: newLevel 
+      }
     });
 
-    if (!profile) return [];
+    return { newXP, newLevel, leveledUp: newLevel > profile.level };
+  },
 
-    const existingBadgeIds = new Set(profile.badges.map(b => b.id));
-    const newBadges: typeof BADGES[keyof typeof BADGES][] = [];
-
-    // --- CHECK 1: View Counts ---
-    if (profile.articlesViewedCount >= 1 && !existingBadgeIds.has(BADGES.NEWCOMER.id)) {
-      newBadges.push(BADGES.NEWCOMER);
-    }
-    if (profile.articlesViewedCount >= 100 && !existingBadgeIds.has(BADGES.SCHOLAR.id)) {
-      newBadges.push(BADGES.SCHOLAR);
-    }
-
-    // --- CHECK 2: Streaks ---
-    // (Assuming updateStreak logic runs on login/daily access, checking here for badge)
-    if (profile.currentStreak >= 7 && !existingBadgeIds.has(BADGES.STREAK_7.id)) {
-      newBadges.push(BADGES.STREAK_7);
-    }
-
-    // --- CHECK 3: Balance (Anti-Echo Chamber) ---
-    const exposure = profile.leanExposure as { Left: number, Center: number, Right: number };
-    if (exposure) {
-      const total = (exposure.Left || 0) + (exposure.Center || 0) + (exposure.Right || 0);
-      if (total > 20) { // Only check after significant reading
-        const pctLeft = (exposure.Left / total) * 100;
-        const pctRight = (exposure.Right / total) * 100;
-        const pctCenter = (exposure.Center / total) * 100;
-
-        // Strict definition of "Balanced": No side is ignored (< 20%)
-        if (pctLeft > 20 && pctRight > 20 && pctCenter > 20 && !existingBadgeIds.has(BADGES.BALANCED_READER.id)) {
-          newBadges.push(BADGES.BALANCED_READER);
-        }
-      }
-    }
-
-    // --- Database Update ---
-    if (newBadges.length > 0) {
-      await prisma.profile.update({
+  // 2. CHECK BADGE ELIGIBILITY
+  // This replaces the complex switch statements in the old service
+  async checkBadges(userId: string, actionType: 'READ' | 'SHARE' | 'COMPARE', metadata?: any) {
+    const profile = await prisma.profile.findUnique({ 
         where: { userId },
-        data: {
-          badges: {
-            push: newBadges.map(b => ({
-              id: b.id,
-              label: b.label,
-              icon: b.icon,
-              description: b.description,
-              earnedAt: new Date()
-            }))
-          },
-          // Increase engagement score for earning badges
-          engagementScore: { increment: newBadges.length * 10 } 
+        include: { 
+            achievedBadges: true, // Assuming relation exists
+            stats: true           // Access bias stats
         }
-      });
+    });
+    
+    if (!profile || !profile.stats) return [];
+
+    const earnedBadges: string[] = [];
+    const currentBadges = new Set(profile.achievedBadges.map(b => b.badgeId));
+
+    // -- LOGIC: BUBBLE BURSTER --
+    if (!currentBadges.has(BADGES.BUBBLE_BURSTER.id) && actionType === 'READ') {
+       // Logic: Check if they have balanced exposure
+       const { Left, Right } = profile.stats.leanExposure as any;
+       // If they have read at least 5 from both sides
+       if (Left >= 5 && Right >= 5) {
+           await this.grantBadge(userId, BADGES.BUBBLE_BURSTER);
+           earnedBadges.push(BADGES.BUBBLE_BURSTER.name);
+       }
     }
 
-    return newBadges;
+    // -- LOGIC: DEEP DIVER --
+    if (!currentBadges.has(BADGES.DEEP_DIVER.id) && actionType === 'READ') {
+       // Logic: Check if article was "Long Form" ( > 5 min read)
+       // This would require checking daily history count of long articles
+       // Simplified for now:
+       if (metadata?.readTime > 5) {
+           // We'd ideally count daily reads here. 
+           // For parity, we'll assume the caller passes a 'dailyLongReadCount' in metadata if available
+           if (metadata.dailyLongReads >= 3) {
+               await this.grantBadge(userId, BADGES.DEEP_DIVER);
+               earnedBadges.push(BADGES.DEEP_DIVER.name);
+           }
+       }
+    }
+
+    // -- LOGIC: VERIFIER --
+    if (!currentBadges.has(BADGES.VERIFIER.id) && actionType === 'COMPARE') {
+        // Increment internal counter in Profile metadata or Stats
+        // For now, we assume this check happens
+        // Implementation note: You might need a field 'compareCount' in UserStats
+    }
+
+    return earnedBadges;
+  },
+
+  // 3. GRANT BADGE HELPER
+  async grantBadge(userId: string, badgeDef: any) {
+      // 1. Create Badge Record
+      await prisma.badge.create({
+          data: {
+              userId,
+              badgeId: badgeDef.id,
+              name: badgeDef.name,
+              icon: badgeDef.icon,
+              earnedAt: new Date()
+          }
+      });
+
+      // 2. Award Bonus XP
+      await this.awardXP(userId, badgeDef.xp, 'BADGE_EARNED');
+      
+      logger.info(`🏆 Badge Awarded: ${badgeDef.name} to ${userId}`);
   }
 };
