@@ -112,7 +112,7 @@ model Narrative {
 
   category         String?
   country          String?
-
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -218,6 +218,7 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
+  
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -250,7 +251,6 @@ model EmergencyContact {
   @@map("emergencycontacts")
 }
 
-// RESTORED: Cache Model from models/cacheModel.ts
 model Cache {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
