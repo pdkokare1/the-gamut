@@ -119,7 +119,6 @@ export const feedService = {
   // =================================================================
   async getInFocusNarratives(limit: number) {
       // Fetch Narratives directly
-      // Use "secondaryPreferred" logic if you had replicas, but Prisma handles this in connection string
       const narratives = await prisma.narrative.findMany({
           orderBy: { lastUpdated: 'desc' },
           take: limit,
@@ -268,5 +267,115 @@ export const feedService = {
           });
           return { saved: true };
       }
+  },
+
+  // =================================================================
+  // 6. TRENDING TOPICS (Replaces getTrendingTopics)
+  // =================================================================
+  async getTrendingTopics(limit: number = 8) {
+      // Aggregate by clusterTopic
+      const groups = await prisma.article.groupBy({
+          by: ['clusterTopic'],
+          where: {
+              publishedAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) }, // Last 48h
+              clusterTopic: { not: null }
+          },
+          _count: {
+              clusterTopic: true
+          },
+          orderBy: {
+              _count: {
+                  clusterTopic: 'desc'
+              }
+          },
+          take: limit
+      });
+
+      // Filter out nulls and empty strings if any slipped through
+      return groups
+          .filter(g => g.clusterTopic && g.clusterTopic.length > 2)
+          .map(g => ({
+              topic: g.clusterTopic,
+              count: g._count.clusterTopic
+          }));
+  },
+
+  // =================================================================
+  // 7. GET SAVED ARTICLES (Replaces getSavedArticles)
+  // =================================================================
+  async getSavedArticles(userId: string) {
+      const profile = await prisma.profile.findUnique({
+          where: { userId },
+          include: {
+              savedArticles: {
+                  orderBy: { publishedAt: 'desc' }
+              }
+          }
+      });
+
+      if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Profile not found" });
+      
+      return profile.savedArticles.map(article => ({
+          ...article,
+          isSaved: true
+      }));
+  },
+
+  // =================================================================
+  // 8. SMART BRIEFING (Replaces getSmartBriefing)
+  // =================================================================
+  async getSmartBriefing(articleId: string) {
+      const article = await prisma.article.findUnique({
+          where: { id: articleId },
+          select: {
+              headline: true,
+              summary: true,
+              keyFindings: true,
+              recommendations: true,
+              trustScore: true,
+              politicalLean: true,
+              source: true
+          }
+      });
+
+      if (!article) throw new TRPCError({ code: "NOT_FOUND", message: "Article not found" });
+
+      const points = (article.keyFindings && article.keyFindings.length > 0)
+          ? article.keyFindings
+          : ["Analysis in progress. Key findings will appear shortly."];
+
+      const recommendations = (article.recommendations && article.recommendations.length > 0)
+          ? article.recommendations
+          : ["Follow this topic for updates.", "Compare sources to verify details."];
+
+      return {
+          title: article.headline,
+          content: article.summary,
+          keyPoints: points,
+          recommendations: recommendations,
+          meta: {
+              trustScore: article.trustScore,
+              politicalLean: article.politicalLean,
+              source: article.source
+          }
+      };
+  },
+
+  // =================================================================
+  // 9. ADMIN CRUD OPERATIONS
+  // =================================================================
+  async createArticle(data: any) {
+      return await prisma.article.create({ data });
+  },
+
+  async updateArticle(id: string, data: any) {
+      return await prisma.article.update({
+          where: { id },
+          data
+      });
+  },
+
+  async deleteArticle(id: string) {
+      return await prisma.article.delete({ where: { id } });
   }
 };
