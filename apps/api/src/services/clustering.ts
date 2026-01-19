@@ -342,7 +342,6 @@ class ClusteringService {
                     masterHeadline: narrativeData.masterHeadline,
                     executiveSummary: narrativeData.executiveSummary,
                     consensusPoints: narrativeData.consensusPoints,
-                    // Note: Prisma schema must support these composite types as Json or specific types
                     divergencePoints: narrativeData.divergencePoints as any, 
                     sourceCount: articles.length,
                     sources: Array.from(distinctSources),
