@@ -1,5 +1,3 @@
-// packages/db/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -48,7 +46,7 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-  
+
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
@@ -86,6 +84,11 @@ model Article {
   @@index([trustScore])
   @@index([clusterId])
   @@index([country])
+  
+  // Restored single-field indexes to match Mongoose config
+  @@index([category])
+  @@index([politicalLean])
+  @@index([isLatest])
 
   // 2. Compound Indexes (Performance Boosters)
   // A. "For You" Feed
@@ -93,7 +96,7 @@ model Article {
   // B. "Trusted News" Feed
   @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])         
   // C. "Cluster View"
-  @@index([clusterId, publishedAt(sort: Desc)])                         
+  @@index([clusterId, publishedAt(sort: Desc)])            
   // D. "Regional News"
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       
   
@@ -119,7 +122,6 @@ model Narrative {
 
   category         String?
   country          String?
-  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -178,7 +180,7 @@ model UserStats {
   averageAttentionSpan  Int      @default(0) 
   
   leanExposure          LeanExposure?
-  
+
   // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
   // Mongoose: Map<String, Number> -> Prisma: Json
   topicInterest         Json?
@@ -221,7 +223,6 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
-  
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
