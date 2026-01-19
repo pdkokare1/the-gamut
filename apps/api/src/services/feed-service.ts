@@ -5,21 +5,33 @@ import { TRPCError } from '@trpc/server';
 import { redis } from '../utils/redis'; 
 import { aiService } from './ai'; 
 import { CONSTANTS } from '../utils/constants';
+import { logger } from '../utils/logger';
 
 // --- Types ---
-interface FeedFilters {
+export interface FeedFilters {
   limit: number;
   cursor?: string | null;
-  offset?: number; // Added to support old pagination style
+  offset?: number;
   category?: string;
   politicalLean?: string;
+  sentiment?: string;
+  source?: string;
   country?: string;
   topic?: string;
+  startDate?: string;
+  endDate?: string;
 }
 
-// --- Helpers from Old ArticleService ---
+interface TopicResult {
+  topic: string;
+  count: number;
+  score: number;
+  vector?: number[];
+  latestDate: Date;
+}
 
-// Helper: Optimize Image URLs for bandwidth
+// --- Helpers ---
+
 const optimizeImageUrl = (url?: string | null) => {
     if (!url) return undefined;
     if (url.includes('cloudinary.com') && !url.includes('f_auto')) {
@@ -28,7 +40,6 @@ const optimizeImageUrl = (url?: string | null) => {
     return url;
 };
 
-// Helper: Cosine Similarity for Vector Matching
 const calculateSimilarity = (vecA: number[], vecB: number[]) => {
     if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
     let dotProduct = 0;
@@ -42,7 +53,6 @@ const calculateSimilarity = (vecA: number[], vecB: number[]) => {
     return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-// Helper: Safely map raw political lean strings to keys
 const mapLeanToKey = (lean: string): 'Left' | 'Right' | 'Center' => {
     if (!lean) return 'Center';
     if (lean.includes('Left') || lean.includes('Liberal')) return 'Left';
@@ -50,9 +60,8 @@ const mapLeanToKey = (lean: string): 'Left' | 'Right' | 'Center' => {
     return 'Center';
 };
 
-// --- Advanced Hybrid Deduplication Helpers ---
+// --- Hybrid Deduplication (Text + Vector) ---
 
-// 1. Text Normalizer
 const getTokens = (str: string) => {
     return str.toLowerCase()
         .replace(/\./g, '') 
@@ -62,11 +71,9 @@ const getTokens = (str: string) => {
         .sort(); 
 };
 
-// 2. Smart String Matcher
 const areTopicsLinguisticallySimilar = (topicA: string, topicB: string) => {
     const tokensA = getTokens(topicA);
     const tokensB = getTokens(topicB);
-    
     const strA = tokensA.join(' ');
     const strB = tokensB.join(' ');
     if (strA === strB) return true;
@@ -86,19 +93,21 @@ const areTopicsLinguisticallySimilar = (topicA: string, topicB: string) => {
     return (matches / total) >= 0.7; 
 };
 
-const deduplicateTopics = (rawTopics: any[]) => {
-    const uniqueTopics: any[] = [];
+const deduplicateTopics = (rawTopics: TopicResult[]) => {
+    const uniqueTopics: TopicResult[] = [];
     const sorted = rawTopics.sort((a, b) => b.count - a.count);
 
     for (const item of sorted) {
         const existingIndex = uniqueTopics.findIndex(u => {
             if (areTopicsLinguisticallySimilar(u.topic, item.topic)) return true;
 
-            const sim = calculateSimilarity(u.vector, item.vector);
-            const timeDiff = Math.abs(new Date(u.latestDate).getTime() - new Date(item.latestDate).getTime());
-            const hoursDiff = timeDiff / (1000 * 60 * 60);
-
-            return sim > 0.92 && hoursDiff < 24;
+            if (u.vector && item.vector) {
+                const sim = calculateSimilarity(u.vector, item.vector);
+                const timeDiff = Math.abs(new Date(u.latestDate).getTime() - new Date(item.latestDate).getTime());
+                const hoursDiff = timeDiff / (1000 * 60 * 60);
+                return sim > 0.92 && hoursDiff < 24;
+            }
+            return false;
         });
 
         if (existingIndex !== -1) {
@@ -113,76 +122,88 @@ const deduplicateTopics = (rawTopics: any[]) => {
     return uniqueTopics;
 };
 
-// --- Service Implementation ---
+// --- Main Service ---
 
 export const feedService = {
   
   // =================================================================
-  // 1. MAIN FEED (Triple Zone Logic: Scored -> Discovery -> Deep)
+  // 1. MAIN FEED (Triple Zone Logic with Filters)
   // =================================================================
   async getWeightedFeed(filters: FeedFilters, userProfile?: any) {
-    const { limit, cursor, offset = 0, category, politicalLean, topic } = filters;
-    const page = Number(offset) / Number(limit);
+    const { limit, cursor, offset = 0, category, politicalLean, topic, sentiment, source, startDate, endDate } = filters;
+    
+    // Build Base Filter
+    const where: Prisma.ArticleWhereInput = {};
+
+    if (category && category !== 'All') where.category = category;
+    if (politicalLean) where.politicalLean = politicalLean;
+    if (source) where.source = source;
+    // Map sentiment string to enum if needed, assuming direct match for now
+    if (sentiment) where.sentiment = sentiment as any; 
+
+    // Date Range Filter
+    if (startDate || endDate) {
+        where.publishedAt = {};
+        if (startDate) where.publishedAt.gte = new Date(startDate);
+        if (endDate) where.publishedAt.lte = new Date(endDate);
+    }
 
     // --- ZONE 0: TOPIC FILTER (Priority) ---
     if (topic) {
          const cleanTopic = topic.replace(/[^\w\s]/g, '').replace(/\s+/g, '.*');
-         const where: Prisma.ArticleWhereInput = {
-             OR: [
-                 { clusterTopic: { equals: topic, mode: 'insensitive' } },
-                 { clusterTopic: { contains: cleanTopic, mode: 'insensitive' } }
-             ]
-         };
-         
-         if (category && category !== 'All') where.category = category;
-         if (politicalLean) where.politicalLean = politicalLean;
+         where.OR = [
+             { clusterTopic: { equals: topic, mode: 'insensitive' } },
+             { clusterTopic: { contains: cleanTopic, mode: 'insensitive' } }
+         ];
 
          const articles = await prisma.article.findMany({
              where,
              orderBy: { publishedAt: 'desc' },
              skip: Number(offset),
-             take: Number(limit),
+             take: Number(limit) + 1, // Fetch +1 for cursor check
              include: { savedByProfiles: userProfile ? { where: { id: userProfile.id } } : false }
          });
 
-         return articles.map(a => ({
-             ...a,
-             imageUrl: optimizeImageUrl(a.imageUrl),
-             isSaved: userProfile ? a.savedByProfiles.length > 0 : false
-         }));
+         return {
+             articles: articles.map(a => ({
+                 ...a,
+                 imageUrl: optimizeImageUrl(a.imageUrl),
+                 isSaved: userProfile ? a.savedByProfiles.length > 0 : false
+             })),
+             pagination: { total: 100 }
+         };
     }
 
     // --- ZONE 3: DEEP SCROLLING (Simple Pagination) ---
-    // If user is deep in the feed, avoid expensive weighting logic
-    if (page >= 5 || cursor) {
-         const where: Prisma.ArticleWhereInput = {};
-         if (category && category !== 'All') where.category = category;
-         if (politicalLean) where.politicalLean = politicalLean;
+    const pageIndex = offset ? (offset / limit) : 0;
+    
+    if (pageIndex >= 5 || cursor) {
          if (cursor) where.id = { lt: cursor };
 
          const articles = await prisma.article.findMany({
              where,
              orderBy: { publishedAt: 'desc' },
              skip: cursor ? 0 : Number(offset),
-             take: Number(limit),
+             take: Number(limit) + 1,
              include: { savedByProfiles: userProfile ? { where: { id: userProfile.id } } : false }
          });
 
-         return articles.map(a => ({
-             ...a,
-             imageUrl: optimizeImageUrl(a.imageUrl),
-             isSaved: userProfile ? a.savedByProfiles.length > 0 : false
-         }));
+         return {
+            articles: articles.map(a => ({
+                ...a,
+                imageUrl: optimizeImageUrl(a.imageUrl),
+                isSaved: userProfile ? a.savedByProfiles.length > 0 : false
+            })),
+            pagination: { total: 1000 }
+         };
     }
 
     // --- ZONE 1 & 2: WEIGHTED CONSTRUCTION (First Load) ---
-    const where: Prisma.ArticleWhereInput = {
-        publishedAt: { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) } // Last 48h
-    };
-    if (category && category !== 'All') where.category = category;
-    if (politicalLean) where.politicalLean = politicalLean;
+    // Apply time constraint only if no explicit date range provided
+    if (!startDate && !endDate) {
+        where.publishedAt = { gte: new Date(Date.now() - 48 * 60 * 60 * 1000) };
+    }
 
-    // Fetch Candidates (Take 80 to have a pool to score)
     const candidates = await prisma.article.findMany({
         where,
         take: 80,
@@ -192,20 +213,16 @@ export const feedService = {
         }
     });
 
-    // Score Candidates
     const scoredCandidates = candidates.map((article) => {
         let score = 0;
         
-        // A. Recency Score
         const hoursOld = (Date.now() - new Date(article.publishedAt).getTime()) / (1000 * 60 * 60);
         score += Math.max(0, 40 - (hoursOld * 1.5));
 
-        // B. Quality Modifiers
         if (article.trustScore > 85) score += 10;
         if (article.biasScore < 15) score += 5; 
         if (article.isLatest) score += 10; 
 
-        // C. Personalization (Vector Similarity)
         if (userProfile?.userEmbedding && article.embedding.length > 0) {
             const sim = calculateSimilarity(userProfile.userEmbedding, article.embedding);
             score += Math.max(0, (sim - 0.5) * 100); 
@@ -220,87 +237,87 @@ export const feedService = {
     const zone1 = sorted.slice(0, 10).map(i => i.article);
     const zone1Ids = new Set(zone1.map(a => a.id));
 
-    // Zone 2: Discovery (Randomized from next 20)
+    // Zone 2: Discovery
     const zone2Candidates = sorted.slice(10, 30).filter(i => !zone1Ids.has(i.article.id));
     const zone2 = zone2Candidates
         .map(i => i.article)
         .sort(() => Math.random() - 0.5);
 
-    const merged = [...zone1, ...zone2].slice(0, Number(limit));
+    const merged = [...zone1, ...zone2].slice(0, Number(limit) + 1);
 
-    return merged.map(article => ({
-        ...article,
-        imageUrl: optimizeImageUrl(article.imageUrl),
-        isSaved: userProfile ? article.savedByProfiles.length > 0 : false
-    }));
+    return {
+        articles: merged.map(article => ({
+            ...article,
+            imageUrl: optimizeImageUrl(article.imageUrl),
+            isSaved: userProfile ? article.savedByProfiles.length > 0 : false
+        })),
+        pagination: { total: 1000 }
+    };
   },
 
   // =================================================================
-  // 2. TRENDING TOPICS (Hybrid Deduplication: Text + Vector)
+  // 2. TRENDING TOPICS (Optimized AggregateRaw)
   // =================================================================
   async getTrendingTopics(limit: number = 12) {
-      // CACHE BUST: 'v13'
-      return redis.getOrFetch('trending_topics_v13', async () => {
+      return redis.getOrFetch('trending_topics_v14_prisma', async () => {
           const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
 
-          // 1. Fetch Candidates (Raw fetch because we need vectors for dedupe)
-          const candidates = await prisma.article.findMany({
-              where: {
-                  publishedAt: { gte: threeDaysAgo },
-                  clusterTopic: { not: null }
+          // Use AggregateRaw for MongoDB performance
+          const rawResults = await prisma.article.aggregateRaw({
+            pipeline: [
+              {
+                $match: {
+                  publishedAt: { $gte: { $date: threeDaysAgo } },
+                  clusterTopic: { $exists: true, $ne: "" }
+                }
               },
-              select: {
-                  clusterTopic: true,
-                  trustScore: true,
-                  embedding: true,
-                  publishedAt: true
+              { $sort: { publishedAt: -1 } },
+              {
+                $group: {
+                  _id: "$clusterTopic",
+                  count: { $sum: 1 },
+                  sampleScore: { $max: "$trustScore" },
+                  latestVector: { $first: "$embedding" },
+                  latestDate: { $first: "$publishedAt" }
+                }
               },
-              orderBy: { publishedAt: 'desc' },
-              take: 200 // Fetch larger pool for analysis
-          });
+              {
+                $match: {
+                  count: { $gte: 2 },
+                  _id: { $ne: "General" }
+                }
+              },
+              { $sort: { count: -1 } },
+              { $limit: 60 }
+            ]
+          }) as unknown as any[];
 
-          // 2. In-Memory Aggregation (Since Prisma doesn't support complex group + first vector)
-          const topicMap = new Map();
+          const candidateList: TopicResult[] = rawResults.map(r => ({
+              topic: r._id,
+              count: r.count,
+              score: r.sampleScore,
+              vector: r.latestVector || [],
+              latestDate: new Date(r.latestDate)
+          }));
 
-          for (const c of candidates) {
-              if (!c.clusterTopic) continue;
-              if (c.clusterTopic === 'General') continue;
+          const cleanList = deduplicateTopics(candidateList);
 
-              if (!topicMap.has(c.clusterTopic)) {
-                  topicMap.set(c.clusterTopic, {
-                      topic: c.clusterTopic,
-                      count: 0,
-                      vector: c.embedding,
-                      latestDate: c.publishedAt
-                  });
-              }
-              const entry = topicMap.get(c.clusterTopic);
-              entry.count += 1;
-          }
-
-          const rawList = Array.from(topicMap.values()).filter(x => x.count >= 2);
-
-          // 3. Hybrid Deduplication
-          const cleanList = deduplicateTopics(rawList);
-
-          // 4. Return Top N
           return cleanList
               .sort((a, b) => b.count - a.count)
               .slice(0, limit)
               .map(({ vector, latestDate, ...rest }) => rest);
 
-      }, CONSTANTS.CACHE.TTL_TRENDING || 300); // Default 5 mins if constant missing
+      }, CONSTANTS.CACHE.TTL_TRENDING || 300);
   },
 
   // =================================================================
-  // 3. INTELLIGENT SEARCH (Vector -> Atlas -> Text Chain)
+  // 3. INTELLIGENT SEARCH
   // =================================================================
   async searchArticles(query: string, limit: number = 20) {
     if (!query) return { articles: [], total: 0 };
-    
     const safeQuery = query.replace(/[^\w\s\-\.\?]/gi, '');
     
-    // 1. Attempt Vector Search
+    // 1. Vector Search
     try {
         const queryEmbedding = await aiService.createEmbedding(safeQuery);
         
@@ -320,7 +337,8 @@ export const feedService = {
                     { "$limit": limit },
                     {
                         "$project": {
-                            "_id": 1, "headline": 1, "summary": 1, "source": 1, "category": 1,
+                            "_id": 1, "id": { "$toString": "$_id" }, 
+                            "headline": 1, "summary": 1, "source": 1, "category": 1,
                             "politicalLean": 1, "url": 1, "imageUrl": 1, "publishedAt": 1,
                             "trustScore": 1, "clusterTopic": 1,
                             "score": { "$meta": "vectorSearchScore" }
@@ -332,55 +350,21 @@ export const feedService = {
 
              const hits = (rawResult as any).cursor?.firstBatch || [];
              if (hits.length > 0) {
-                 // Remap _id to id for consistency
                  return { 
-                     articles: hits.map((h: any) => ({ ...h, id: h._id, imageUrl: optimizeImageUrl(h.imageUrl) })), 
+                     articles: hits.map((h: any) => ({ 
+                         ...h, 
+                         publishedAt: new Date(h.publishedAt),
+                         imageUrl: optimizeImageUrl(h.imageUrl) 
+                     })), 
                      total: hits.length 
                  };
              }
         }
     } catch (err) {
-        console.warn(`[Search] Vector search failed: ${err}`);
+        logger.warn(`[Search] Vector search failed: ${err}`);
     }
 
-    // 2. Fallback: Atlas Text Search
-    try {
-         const rawResult = await prisma.$runCommandRaw({
-            aggregate: "articles",
-            pipeline: [
-              {
-                "$search": {
-                  "index": "default", 
-                  "text": {
-                    "query": safeQuery,
-                    "path": { "wildcard": "*" },
-                    "fuzzy": {}
-                  }
-                }
-              },
-              { "$limit": limit },
-              {
-                "$project": {
-                   "_id": 1, "headline": 1, "summary": 1, "imageUrl": 1, "publishedAt": 1,
-                   "score": { "$meta": "searchScore" }
-                }
-              }
-            ],
-            cursor: {}
-         });
-         
-         const hits = (rawResult as any).cursor?.firstBatch || [];
-         if (hits.length > 0) {
-             return { 
-                 articles: hits.map((h: any) => ({ ...h, id: h._id, imageUrl: optimizeImageUrl(h.imageUrl) })), 
-                 total: hits.length 
-             };
-         }
-    } catch (err) {
-        console.warn(`[Search] Atlas text search failed: ${err}`);
-    }
-
-    // 3. Final Fallback: Standard Regex
+    // 2. Fallback: Text Search
     const articles = await prisma.article.findMany({
          where: {
              OR: [
@@ -400,11 +384,10 @@ export const feedService = {
   },
 
   // =================================================================
-  // 4. BALANCED FEED (Anti-Echo Chamber)
+  // 4. BALANCED FEED
   // =================================================================
-  async getBalancedFeed(userProfile: any, limit: number = 20) {
-      if (!userProfile) {
-          // If no user, just return high trust news
+  async getBalancedFeed(userId: string, limit: number = 5) {
+      if (!userId) {
           const articles = await prisma.article.findMany({
               where: { trustScore: { gte: 80 } },
               take: limit,
@@ -413,27 +396,20 @@ export const feedService = {
           return { articles, meta: { reason: "Trusted Headlines" } };
       }
 
-      // Fetch User Stats
-      const stats = await prisma.userStats.findUnique({
-          where: { userId: userProfile.userId }
-      });
-
+      const stats = await prisma.userStats.findUnique({ where: { userId } });
       let targetLean: string[] = [];
       let reason = "Global Perspectives";
 
       if (stats?.leanExposure) {
-          const { Left, Right, Center } = stats.leanExposure;
-          const total = Left + Right + Center;
-
-          if (total > 50) { 
+          const exposure = stats.leanExposure as any;
+          const { Left, Right, Center } = exposure;
+          if ((Left + Right + Center) > 50) { 
                if (Left > Right * 1.5) {
                    targetLean = ['Right', 'Right-Leaning', 'Center'];
                    reason = "Perspectives from Center & Right";
                } else if (Right > Left * 1.5) {
                    targetLean = ['Left', 'Left-Leaning', 'Center'];
                    reason = "Perspectives from Center & Left";
-               } else {
-                   reason = "Deep Dive & Neutral Analysis";
                }
           }
       }
@@ -443,9 +419,7 @@ export const feedService = {
           trustScore: { gte: 70 }
       };
 
-      if (targetLean.length > 0) {
-          where.politicalLean = { in: targetLean };
-      }
+      if (targetLean.length > 0) where.politicalLean = { in: targetLean };
 
       const articles = await prisma.article.findMany({
           where,
@@ -464,15 +438,12 @@ export const feedService = {
   },
 
   // =================================================================
-  // 5. IN FOCUS (Narratives or Top Stories)
+  // 5. IN FOCUS (Narratives)
   // =================================================================
   async getInFocusFeed(filters: FeedFilters) {
      const { offset = 0, limit = 20, category } = filters;
-     
      const where: Prisma.NarrativeWhereInput = {};
-     if (category && category !== 'All') {
-         where.category = category;
-     }
+     if (category && category !== 'All') where.category = category;
 
      try {
          const narratives = await prisma.narrative.findMany({
@@ -493,23 +464,53 @@ export const feedService = {
              };
          }
      } catch (err) {
-         console.error("[InFocus] Error fetching narratives:", err);
+         logger.error("[InFocus] Error fetching narratives:", err);
      }
 
-     // Fallback to Articles if no narratives
-     return this.getWeightedFeed(filters);
+     // Fallback to Articles
+     const result = await this.getWeightedFeed(filters);
+     return { ...result, meta: { description: "Top Headlines" } };
   },
 
   // =================================================================
-  // 6. TOGGLE SAVE
+  // 6. SMART BRIEFING
+  // =================================================================
+  async getSmartBriefing(articleId: string) {
+      const article = await prisma.article.findUnique({
+          where: { id: articleId },
+          select: {
+              headline: true, summary: true, keyFindings: true, recommendations: true,
+              trustScore: true, politicalLean: true, source: true
+          }
+      });
+
+      if (!article) throw new TRPCError({ code: 'NOT_FOUND', message: 'Article not found' });
+
+      return {
+          status: 'success',
+          data: {
+              title: article.headline,
+              content: article.summary,
+              keyPoints: article.keyFindings.length ? article.keyFindings : ["Analysis in progress."],
+              recommendations: article.recommendations.length ? article.recommendations : ["Compare sources."],
+              meta: {
+                  trustScore: article.trustScore,
+                  politicalLean: article.politicalLean,
+                  source: article.source
+              }
+          }
+      };
+  },
+
+  // =================================================================
+  // 7. USER ACTIONS (Save, Personalized)
   // =================================================================
   async toggleSaveArticle(userId: string, articleId: string) {
       const profile = await prisma.profile.findUnique({
           where: { userId },
           include: { savedArticles: true }
       });
-
-      if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Profile not found" });
+      if (!profile) throw new TRPCError({ code: "NOT_FOUND" });
 
       const isSaved = profile.savedArticles.some(a => a.id === articleId);
 
@@ -527,41 +528,64 @@ export const feedService = {
           return { saved: true };
       }
   },
-  
-  // =================================================================
-  // 7. GET SAVED
-  // =================================================================
+
   async getSavedArticles(userId: string) {
       const profile = await prisma.profile.findUnique({
           where: { userId },
-          include: {
-              savedArticles: {
-                  orderBy: { publishedAt: 'desc' }
-              }
-          }
+          include: { savedArticles: { orderBy: { publishedAt: 'desc' } } }
+      });
+      return profile?.savedArticles.map(a => ({...a, isSaved: true, imageUrl: optimizeImageUrl(a.imageUrl)})) || [];
+  },
+
+  async getPersonalizedFeed(userId: string) {
+      const profile = await prisma.profile.findUnique({ 
+          where: { userId },
+          select: { userEmbedding: true } 
       });
 
-      if (!profile) return [];
+      if (!profile?.userEmbedding?.length) return { articles: [], meta: { reason: "No data" } };
+
+      const rawResults = await prisma.$runCommandRaw({
+          aggregate: "articles",
+          pipeline: [
+              {
+                  "$vectorSearch": {
+                      "index": "vector_index",
+                      "path": "embedding",
+                      "queryVector": profile.userEmbedding,
+                      "numCandidates": 100,
+                      "limit": 20
+                  }
+              },
+              { "$limit": 20 },
+              {
+                   "$project": {
+                       "_id": 1, "id": { "$toString": "$_id" },
+                       "headline": 1, "summary": 1, "imageUrl": 1, "publishedAt": 1,
+                       "score": { "$meta": "vectorSearchScore" }
+                   }
+              }
+          ],
+          cursor: {}
+      });
       
-      return profile.savedArticles.map(article => ({
-          ...article,
-          imageUrl: optimizeImageUrl(article.imageUrl),
-          isSaved: true
-      }));
+      const hits = (rawResults as any).cursor?.firstBatch || [];
+      
+      return {
+          articles: hits.map((a: any) => ({
+              ...a,
+              publishedAt: new Date(a.publishedAt),
+              suggestionType: 'Comfort',
+              imageUrl: optimizeImageUrl(a.imageUrl)
+          })),
+          meta: { topCategories: ["AI Curated"] }
+      };
   },
 
   // =================================================================
-  // 8. ADMIN / MIGRATION HELPERS
+  // 8. CRUD
   // =================================================================
-  async createArticle(data: any) {
-      return await prisma.article.create({ data });
-  },
-
-  async updateArticle(id: string, data: any) {
-      return await prisma.article.update({ where: { id }, data });
-  },
-
-  async deleteArticle(id: string) {
-      return await prisma.article.delete({ where: { id } });
-  }
+  async createArticle(data: any) { return prisma.article.create({ data }); },
+  async updateArticle(id: string, data: any) { return prisma.article.update({ where: { id }, data }); },
+  async deleteArticle(id: string) { return prisma.article.delete({ where: { id } }); }
 };
