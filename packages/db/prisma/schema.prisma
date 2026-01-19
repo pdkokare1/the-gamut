@@ -33,16 +33,16 @@ model Article {
   sentiment       Sentiment    @default(Neutral)
   analysisVersion String       @default("3.6") 
   
-  // -- Scores & Components (STRICT TYPED) --
-  biasScore            Float    @default(0)
+  // -- Scores & Components (Strictly Typed) --
+  biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
   
-  credibilityScore     Float    @default(0)
+  credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
   
-  reliabilityScore     Float    @default(0)
+  reliabilityScore     Float                  @default(0)
   reliabilityGrade     String?
   reliabilityComponents ReliabilityComponents?
   
@@ -65,6 +65,7 @@ model Article {
   isLatest       Boolean @default(true)
   
   // -- Vector Data --
+  // Note: We will exclude this field in API calls via "select" to save bandwidth
   embedding      Float[]
   
   keyFindings     String[]
@@ -80,9 +81,13 @@ model Article {
   activityLogs      ActivityLog[]
 
   // -- Indexes --
+  // Optimized for "For You" Feed
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) 
+  // Optimized for "Trusted News"
   @@index([politicalLean, trustScore, publishedAt(sort: Desc)])         
+  // Optimized for Cluster View
   @@index([clusterId, publishedAt(sort: Desc)])                         
+  // Optimized for Regional News
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       
   @@index([isLatest, publishedAt(sort: Desc)])
   
@@ -105,6 +110,7 @@ model Narrative {
 
   category         String?
   country          String?
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -119,6 +125,7 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique 
   
+  // Sparse indexes for optional Auth methods
   email                 String?  @unique
   phoneNumber           String?  @unique
   username              String   @unique
@@ -150,7 +157,7 @@ model Profile {
   // Relations
   activityLogs          ActivityLog[]
   userStats             UserStats?
-  
+
   @@map("profiles")
 }
 
@@ -161,9 +168,11 @@ model UserStats {
   totalTimeSpent        Int      @default(0) 
   averageAttentionSpan  Int      @default(0) 
   
-  leanExposure          LeanExposure? 
+  leanExposure          LeanExposure?
   
-  topicInterest         Json?    // Kept as Json for dynamic keys (Topic names)
+  // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
+  topicInterest         Json?
+  
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
@@ -201,6 +210,7 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
+  
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -247,8 +257,6 @@ model Cache {
 // 4. TYPES & ENUMS
 // ==========================================
 
-// --- Composite Types for Analysis (Restoring Mongoose Strictness) ---
-
 type BiasComponents {
   linguistic      LinguisticBias
   sourceSelection SourceSelectionBias
@@ -264,8 +272,8 @@ type LinguisticBias {
 }
 
 type SourceSelectionBias {
-  sourceDiversity        Float
-  expertBalance          Float
+  sourceDiversity         Float
+  expertBalance           Float
   attributionTransparency Float
 }
 
@@ -291,15 +299,13 @@ type CredibilityComponents {
 }
 
 type ReliabilityComponents {
-  consistency         Float
-  temporalStability   Float
-  qualityControl      Float
+  consistency          Float
+  temporalStability    Float
+  qualityControl       Float
   publicationStandards Float
-  correctionsPolicy   Float
-  updateMaintenance   Float
+  correctionsPolicy    Float
+  updateMaintenance    Float
 }
-
-// --- Existing Types ---
 
 type Badge {
   id          String
@@ -316,7 +322,7 @@ type LeanExposure {
 }
 
 type DivergencePoint {
-  point        String
+  point       String
   perspectives Perspective[]
 }
 
