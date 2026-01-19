@@ -102,13 +102,18 @@ class AIService {
     return text.replace(/\s+/g, ' ').trim();
   }
 
+  /**
+   * ⚡ Smart Context Optimization
+   * Restored specific junk phrase removal from old backend to save tokens and improve quality.
+   */
   private optimizeTextForTokenLimits(text: string, isProMode: boolean = false): string {
       let clean = this.cleanText(text);
 
       const junkPhrases = [
           "Subscribe to continue reading", "Read more", "Sign up for our newsletter",
           "Follow us on", "© 2023", "© 2024", "© 2025", "All rights reserved",
-          "Click here", "Advertisement", "Supported by", "Terms of Service"
+          "Click here", "Advertisement", "Supported by", "Terms of Service",
+          "Join our community", "Log in to comment"
       ];
       junkPhrases.forEach(phrase => {
           clean = clean.replace(new RegExp(phrase, 'gi'), '');
@@ -125,6 +130,10 @@ class AIService {
       return clean;
   }
 
+  /**
+   * Smart Truncation
+   * Ensures fallbacks don't cut off in the middle of a sentence.
+   */
   private smartTruncate(text: string, targetWordCount: number): string {
       if (!text) return "";
       const words = text.split(/\s+/);
@@ -133,6 +142,8 @@ class AIService {
 
       const truncated = words.slice(0, targetWordCount).join(' ');
       const lastDot = truncated.lastIndexOf('.');
+      
+      // If dot is reasonably far into the text, cut there. Otherwise just append ...
       if (lastDot > targetWordCount * 0.5) { 
           return truncated.substring(0, lastDot + 1);
       }
@@ -151,6 +162,7 @@ class AIService {
     const isPro = targetModel.includes('pro');
     const optimizedArticle = {
         ...article,
+        // Apply strict cleaning before sending to AI
         summary: this.optimizeTextForTokenLimits(article.summary || article.content || "", isPro),
         headline: article.headline ? this.cleanText(article.headline) : ""
     };
