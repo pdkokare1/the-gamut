@@ -1,7 +1,7 @@
+// apps/api/src/services/feed-algo.ts
 import { PrismaClient } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
-
-const prisma = new PrismaClient();
+import { prisma } from '@gamut/db'; // Use shared client
 
 // ==========================================
 // 1. HELPERS (Deduplication & Math)
@@ -63,11 +63,9 @@ export const feedService = {
 
   // --- A. HYBRID DEDUPLICATION (Trending) ---
   async getTrendingTopics() {
-    // 1. Fetch Candidates via Prisma Aggregate (Raw for efficiency)
     const threeDaysAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
     
-    // Using simple findMany to get candidates, then processing in JS 
-    // (Prisma GroupBy is limited on MongoDB)
+    // Using simple findMany to get candidates
     const rawArticles = await prisma.article.findMany({
       where: {
         publishedAt: { gte: threeDaysAgo },
@@ -82,7 +80,6 @@ export const feedService = {
       take: 200
     });
 
-    // Grouping Logic
     const topicMap = new Map();
     
     for (const art of rawArticles) {
@@ -103,16 +100,12 @@ export const feedService = {
     }
 
     const candidateList = Array.from(topicMap.values());
-
-    // Deduplicate
     const uniqueTopics: any[] = [];
     const sorted = candidateList.sort((a, b) => b.count - a.count);
 
     for (const item of sorted) {
       const existingIndex = uniqueTopics.findIndex(u => {
-        // Linguistic Check
         if (areTopicsLinguisticallySimilar(u.topic, item.topic)) return true;
-        // Vector Check
         const sim = calculateSimilarity(u.vector, item.vector);
         return sim > 0.92;
       });
@@ -132,7 +125,6 @@ export const feedService = {
 
   // --- B. VECTOR SEARCH (Intelligent Search) ---
   async searchArticles(query: string, embeddingVector: number[] | null, limit: number = 12) {
-    // Fallback to text search if no vector provided
     if (!embeddingVector || embeddingVector.length === 0) {
       return prisma.article.findMany({
         where: {
@@ -145,8 +137,6 @@ export const feedService = {
       });
     }
 
-    // Prisma Raw Aggregate for Vector Search
-    // Note: Requires $vectorSearch index on MongoDB Atlas
     try {
       const results = await prisma.article.aggregateRaw({
         pipeline: [
@@ -170,10 +160,9 @@ export const feedService = {
         ]
       });
       
-      // Fix: Map generic JSON result to typed objects
       return (results as any[]).map((r: any) => ({
         ...r,
-        id: r._id.$oid, // Fix ObjectId mapping
+        id: r._id.$oid, 
         publishedAt: new Date(r.publishedAt.$date || r.publishedAt)
       }));
     } catch (e) {
@@ -192,7 +181,7 @@ export const feedService = {
     // Zone 3: Deep Scroll (Standard efficient paging)
     if (offset >= 20) {
       return prisma.article.findMany({
-        where: { isLatest: true, ...filters.where }, // Apply simple filters
+        where: { isLatest: true, ...filters.where },
         orderBy: { publishedAt: 'desc' },
         skip: offset,
         take: limit
@@ -207,18 +196,14 @@ export const feedService = {
         isLatest: true,
         ...filters.where
       },
-      take: 80,
-      include: {
-        // We need embedding ONLY for calculation, not sending to client
-        // Prisma doesn't support 'select: false', so we fetch and strip later
-      }
+      take: 80
     });
 
     // 2. Score Candidates
     const scored = candidates.map((article) => {
       let score = 0;
       
-      // Time Decay
+      // Time Decay Formula (Original)
       const hoursOld = (Date.now() - article.publishedAt.getTime()) / (1000 * 60 * 60);
       score += Math.max(0, 40 - (hoursOld * 1.5));
 
@@ -238,10 +223,10 @@ export const feedService = {
     // 3. Sort & Zone
     const sorted = scored.sort((a, b) => b.score - a.score);
     
-    const zone1 = sorted.slice(0, 10).map(i => i.article);
+    const zone1 = sorted.slice(0, 10).map(i => i.article); // Top Quality
     const zone2 = sorted.slice(10, 30)
       .map(i => i.article)
-      .sort(() => Math.random() - 0.5); // Shuffle for discovery
+      .sort(() => Math.random() - 0.5); // Shuffle for discovery (Restored)
 
     const mixed = [...zone1, ...zone2].slice(0, limit);
     return mixed;
