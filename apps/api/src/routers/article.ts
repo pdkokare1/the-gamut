@@ -45,7 +45,7 @@ export const articleRouter = router({
       const article = await prisma.article.findUnique({
         where: { id: input.id },
         include: {
-           // We can include related articles or checking if saved here if needed
+           // Include explicit relations if necessary for frontend
            savedByProfiles: false
         }
       });
@@ -65,7 +65,6 @@ export const articleRouter = router({
     }),
 
   // 4. BALANCED FEED (Echo Chamber Breaker)
-  // Protected: Only for logged-in users with history
   getBalancedFeed: protectedProcedure
     .input(z.object({ limit: z.number().default(5) }))
     .query(async ({ input, ctx }) => {
@@ -76,15 +75,26 @@ export const articleRouter = router({
        return await feedService.getBalancedFeed(userProfile, input.limit);
     }),
 
-  // 5. TOGGLE SAVE
+  // 5. IN FOCUS FEED (Missing Feature Restored)
+  // Used for the "Narratives" or "In Focus" bar
+  getInFocusFeed: publicProcedure
+    .input(z.object({ 
+        category: z.string().optional(),
+        limit: z.number().default(10),
+        offset: z.number().default(0)
+    }))
+    .query(async ({ input }) => {
+        return await feedService.getInFocusFeed(input);
+    }),
+
+  // 6. TOGGLE SAVE
   toggleSave: protectedProcedure
     .input(z.object({ articleId: z.string() }))
     .mutation(async ({ input, ctx }) => {
        return await feedService.toggleSaveArticle(ctx.user.uid, input.articleId);
     }),
 
-  // 6. GENERATE AUDIO (TTS)
-  // Connects to your TTS logic (we will port ttsService later)
+  // 7. GENERATE AUDIO (TTS)
   getAudio: protectedProcedure
     .input(z.object({ articleId: z.string() }))
     .mutation(async ({ input }) => {
@@ -93,49 +103,44 @@ export const articleRouter = router({
        
        if (article.audioUrl) return { audioUrl: article.audioUrl };
 
-       // Placeholder: We will hook up the actual TTS Service in the next step
+       // Placeholder: Hooks into future ttsService
        return { audioUrl: null, status: "pending" };
     }),
 
-  // 7. GET SAVED ARTICLES
-  // Restore functionality from articleController.getSavedArticles
+  // 8. GET SAVED ARTICLES
   getSaved: protectedProcedure
     .query(async ({ ctx }) => {
        return await feedService.getSavedArticles(ctx.user.uid);
     }),
 
-  // 8. TRENDING TOPICS
-  // Restore functionality from articleController.getTrendingTopics
+  // 9. TRENDING TOPICS
   trending: publicProcedure
     .input(z.object({ limit: z.number().optional().default(8) }))
     .query(async ({ input }) => {
        return await feedService.getTrendingTopics(input.limit);
     }),
 
-  // 9. SMART BRIEFING
-  // Restore functionality from articleController.getSmartBriefing
+  // 10. SMART BRIEFING
   smartBriefing: publicProcedure
     .input(z.object({ articleId: z.string() }))
     .query(async ({ input }) => {
        return await feedService.getSmartBriefing(input.articleId);
     }),
 
-  // 10. ADMIN: CREATE ARTICLE
+  // 11. ADMIN OPERATIONS
   create: protectedProcedure
-    .input(z.any()) // Replace with strict validation schema later
+    .input(z.any()) 
     .mutation(async ({ input, ctx }) => {
-       // Ideally check for Admin role here: if (ctx.user.role !== 'ADMIN') ...
+       // Add Admin Check here in future
        return await feedService.createArticle(input);
     }),
 
-  // 11. ADMIN: UPDATE ARTICLE
   update: protectedProcedure
     .input(z.object({ id: z.string(), data: z.any() }))
     .mutation(async ({ input }) => {
        return await feedService.updateArticle(input.id, input.data);
     }),
 
-  // 12. ADMIN: DELETE ARTICLE
   delete: protectedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input }) => {
