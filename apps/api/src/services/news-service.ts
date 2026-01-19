@@ -36,8 +36,9 @@ class NewsService {
             
             return (newValue - 1) % FETCH_CYCLES.length;
         } catch (e) {
-            logger.warn(`Redis Cycle Error. Defaulting to 0.`);
-            return 0; // Fallback
+            logger.warn(`Redis Cycle Error. Defaulting to Random.`);
+            // RESTORED: Fallback to Random cycle instead of 0 to prevent hotspotting Cycle A
+            return Math.floor(Math.random() * FETCH_CYCLES.length);
         }
     }
 
