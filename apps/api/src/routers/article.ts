@@ -95,5 +95,50 @@ export const articleRouter = router({
 
        // Placeholder: We will hook up the actual TTS Service in the next step
        return { audioUrl: null, status: "pending" };
+    }),
+
+  // 7. GET SAVED ARTICLES
+  // Restore functionality from articleController.getSavedArticles
+  getSaved: protectedProcedure
+    .query(async ({ ctx }) => {
+       return await feedService.getSavedArticles(ctx.user.uid);
+    }),
+
+  // 8. TRENDING TOPICS
+  // Restore functionality from articleController.getTrendingTopics
+  trending: publicProcedure
+    .input(z.object({ limit: z.number().optional().default(8) }))
+    .query(async ({ input }) => {
+       return await feedService.getTrendingTopics(input.limit);
+    }),
+
+  // 9. SMART BRIEFING
+  // Restore functionality from articleController.getSmartBriefing
+  smartBriefing: publicProcedure
+    .input(z.object({ articleId: z.string() }))
+    .query(async ({ input }) => {
+       return await feedService.getSmartBriefing(input.articleId);
+    }),
+
+  // 10. ADMIN: CREATE ARTICLE
+  create: protectedProcedure
+    .input(z.any()) // Replace with strict validation schema later
+    .mutation(async ({ input, ctx }) => {
+       // Ideally check for Admin role here: if (ctx.user.role !== 'ADMIN') ...
+       return await feedService.createArticle(input);
+    }),
+
+  // 11. ADMIN: UPDATE ARTICLE
+  update: protectedProcedure
+    .input(z.object({ id: z.string(), data: z.any() }))
+    .mutation(async ({ input }) => {
+       return await feedService.updateArticle(input.id, input.data);
+    }),
+
+  // 12. ADMIN: DELETE ARTICLE
+  delete: protectedProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ input }) => {
+       return await feedService.deleteArticle(input.id);
     })
 });
