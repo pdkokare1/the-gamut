@@ -4,12 +4,13 @@ import { PromptType } from '@prisma/client';
 import redisHelper from './redis';
 import { logger } from './logger';
 
-// --- RICH DEFAULT PROMPTS (Fallback) ---
+// --- RICH DEFAULT PROMPTS (Strict Rules) ---
 
 const AI_PERSONALITY = {
     LENGTH_INSTRUCTION: "Minimum 50 words and Maximum 60 words", 
     TONE: "Objective, authoritative, and direct (News Wire Style)",
     BIAS_STRICTNESS: "Strict. Flag subtle framing, omission, and emotional language.",
+    // Specific words to avoid (Restored from old backend)
     FORBIDDEN_WORDS: "delves, underscores, crucial, tapestry, landscape, moreover, notably, the article, the report, the author, discusses, highlights, according to"
 };
 
@@ -118,21 +119,17 @@ Respond ONLY in valid JSON:
 }
 `;
 
-// Helper type to handle the special 'SUMMARY_ONLY' case without using @ts-ignore
 type ExtendedPromptType = PromptType | 'SUMMARY_ONLY';
 
 class PromptManager {
     
     async getTemplate(type: ExtendedPromptType = PromptType.ANALYSIS): Promise<string> {
-        // Hardcoded bypass for the basic summary prompt
         if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
 
         const CACHE_KEY = `PROMPT_${type}`;
 
-        // Use new Redis Helper (Get from Cache OR Fetch from DB)
         return await redisHelper.getOrFetch<string>(CACHE_KEY, async () => {
             try {
-                // Prisma query
                 const promptDoc = await prisma.prompt.findUnique({
                     where: { type: type as PromptType }
                 });
@@ -144,9 +141,8 @@ class PromptManager {
                 logger.warn(`⚠️ Prompt DB Fetch failed: ${e.message}`);
             }
             
-            // Fallback if DB fails or no prompt found
             return DEFAULT_ANALYSIS_PROMPT;
-        }, 600); // Cache for 10 minutes
+        }, 600); 
     }
 
     private interpolate(template: string, data: Record<string, string>): string {
