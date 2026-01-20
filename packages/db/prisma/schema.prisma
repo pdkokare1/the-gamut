@@ -89,7 +89,7 @@ model Article {
   @@index([category])
   @@index([politicalLean])
   @@index([isLatest])
-  @@index([publishedAt(sort: Desc)]) // Added for parity with old model
+  @@index([publishedAt(sort: Desc)]) 
 
   // 2. Compound Indexes (Performance Boosters)
   // A. "For You" Feed: Filter by Category + Lean + Date + Latest Only
@@ -103,9 +103,6 @@ model Article {
   
   // General Sort Helpers
   @@index([isLatest, publishedAt(sort: Desc)])
-  
-  // Note: Text Search Indexes (headline, summary) must be created in MongoDB Atlas or via raw command
-  // Note: TTL Index (expireAfterSeconds) must be created manually in MongoDB
   
   @@map("articles")
 }
@@ -122,10 +119,12 @@ model Narrative {
   sources          String[]
   
   consensusPoints  String[]
+  
   divergencePoints DivergencePoint[]
 
   category         String?
   country          String?
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -172,7 +171,7 @@ model Profile {
   // Relations
   activityLogs          ActivityLog[]
   userStats             UserStats?
-  
+
   @@map("profiles")
 }
 
@@ -186,6 +185,7 @@ model UserStats {
   leanExposure          LeanExposure?
   // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
   topicInterest         Json?
+
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
@@ -225,6 +225,7 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
+
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -260,6 +261,7 @@ model EmergencyContact {
 model Cache {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
+  
   data        Json
   expiresAt   DateTime 
   createdAt   DateTime @default(now())
