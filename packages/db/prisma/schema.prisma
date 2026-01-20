@@ -37,7 +37,7 @@ model Article {
   biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
-
+  
   credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
@@ -89,12 +89,13 @@ model Article {
   @@index([category])
   @@index([politicalLean])
   @@index([isLatest])
+  @@index([publishedAt(sort: Desc)]) // Added for parity with old model
 
   // 2. Compound Indexes (Performance Boosters)
   // A. "For You" Feed: Filter by Category + Lean + Date + Latest Only
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) 
   // B. "Trusted News" Feed: Filter by Lean + High Trust + Date
-  @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])         
+  @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])        
   // C. "Cluster View": Quickly find all articles in a specific event
   @@index([clusterId, publishedAt(sort: Desc)])            
   // D. "Regional News"
@@ -102,6 +103,9 @@ model Article {
   
   // General Sort Helpers
   @@index([isLatest, publishedAt(sort: Desc)])
+  
+  // Note: Text Search Indexes (headline, summary) must be created in MongoDB Atlas or via raw command
+  // Note: TTL Index (expireAfterSeconds) must be created manually in MongoDB
   
   @@map("articles")
 }
@@ -122,7 +126,6 @@ model Narrative {
 
   category         String?
   country          String?
-  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -137,7 +140,7 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique 
   
-  // Sparse indexes for Auth
+  // Sparse indexes for Auth (Optional Unique)
   email                 String?  @unique
   phoneNumber           String?  @unique
   username              String   @unique
@@ -169,7 +172,7 @@ model Profile {
   // Relations
   activityLogs          ActivityLog[]
   userStats             UserStats?
-
+  
   @@map("profiles")
 }
 
@@ -181,10 +184,8 @@ model UserStats {
   averageAttentionSpan  Int      @default(0) 
   
   leanExposure          LeanExposure?
-  
   // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
   topicInterest         Json?
-  
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
@@ -220,6 +221,7 @@ model Prompt {
   id          String     @id @default(auto()) @map("_id") @db.ObjectId
   type        PromptType @unique
   text        String
+  
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
