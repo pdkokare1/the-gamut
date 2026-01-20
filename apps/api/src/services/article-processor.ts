@@ -1,22 +1,21 @@
-import { NewsArticle } from './gnews';
-
-// Constants moved here for safety
-const TRUSTED_SOURCES = ['Reuters', 'AP', 'BBC', 'NPR', 'PBS', 'Bloomberg', 'WSJ', 'The Guardian', 'Financial Times'];
-const JUNK_KEYWORDS = ['horoscope', 'deal of the day', 'best seller', 'gift guide', 'coupon', 'lottery', 'sex', 'dating', 'casino'];
+// apps/api/src/services/article-processor.ts
+import { NewsArticle } from './gnews'; // Assuming interface exists
+import { TRUSTED_SOURCES, JUNK_KEYWORDS } from '../utils/constants';
 
 class ArticleProcessor {
 
     /**
      * Main Pipeline: Clean -> Score -> Deduplicate (Fuzzy)
+     * Mirrors old narrative-backend/services/articleProcessor.ts logic
      */
     public processBatch(articles: NewsArticle[]): any[] {
-        // 1. Score
+        // 1. First pass: Scoring and Basic Cleaning
         const scored = articles.map(a => ({
             article: a,
             score: this.calculateScore(a)
         }));
 
-        // 2. Sort by Quality
+        // 2. Sort by Quality (Highest Score First)
         scored.sort((a, b) => b.score - a.score);
 
         const uniqueArticles: any[] = [];
@@ -27,14 +26,15 @@ class ArticleProcessor {
         for (const item of scored) {
             const article = item.article;
 
-            // A. Quality Cutoff
+            // A. Quality Cutoff (Matches old "Raised Bar" logic)
+            // Score < 0 items are discarded (usually junk keywords or untrusted no-image)
             if (item.score < 0) continue;
 
             // B. Text Cleanup
             article.title = this.formatHeadline(article.title);
             article.description = this.cleanText(article.description || "");
 
-            // C. Validation
+            // C. Validation (Length & Word Count checks)
             if (!this.isValid(article)) continue;
 
             // D. Deduplication (Exact URL)
@@ -43,13 +43,15 @@ class ArticleProcessor {
             // E. Deduplication (Fuzzy Title)
             if (this.isFuzzyDuplicate(article.title, seenTitles)) continue;
 
+            // Accepted!
             seenUrls.add(article.url);
             seenTitles.push(article.title);
             
-            // Return shape ready for Prisma
+            // Return shape ready for Prisma/DB Service
             uniqueArticles.push({
                 ...article,
-                source: article.source.name, // Flatten source object to string
+                source: typeof article.source === 'object' ? article.source.name : article.source,
+                // Default scores (will be updated by AI Service later)
                 biasScore: 0,
                 credibilityScore: 0,
                 reliabilityScore: 0,
@@ -61,22 +63,36 @@ class ArticleProcessor {
         return uniqueArticles;
     }
 
+    /**
+     * EXACT PORT of old calculateScore logic
+     */
     private calculateScore(a: NewsArticle): number {
         let score = 0;
         const titleLower = (a.title || "").toLowerCase();
-        const sourceLower = (a.source.name || "").toLowerCase();
+        const sourceLower = (typeof a.source === 'object' ? a.source.name : a.source || "").toLowerCase();
         
         const isTrusted = TRUSTED_SOURCES.some(src => sourceLower.includes(src.toLowerCase()));
 
+        // Image Quality Rules
         if (a.image && a.image.startsWith('http')) {
             score += 2;
         } else {
-            if (!isTrusted) score -= 10;
-            else score -= 2;
+            if (!isTrusted) {
+                // Strict penalty for untrusted sources without images
+                score -= 10; 
+            } else {
+                 // Trusted sources get a pass but small penalty
+                 score -= 2;
+            }
         }
 
+        // Title Length Bonus
         if (a.title && a.title.length > 40) score += 1;
+
+        // Trusted Source Bonus
         if (isTrusted) score += 5; 
+
+        // Junk/Clickbait Penalty (The Trap)
         if (JUNK_KEYWORDS.some(word => titleLower.includes(word))) score -= 20;
 
         return score;
@@ -84,9 +100,15 @@ class ArticleProcessor {
 
     private isValid(article: NewsArticle): boolean {
         if (!article.title || !article.url) return false;
-        if (article.title.length < 20) return false;
-        if (!article.description || article.description.length < 30) return false;
         
+        // Filter out short "ticker" updates
+        if (article.title.length < 20) return false; 
+        
+        if (article.title === "No Title") return false;
+        if (!article.description || article.description.length < 30) return false; 
+        
+        // Word Count Check (prevent "Garbage In")
+        // If Title + Desc < 40 words, AI context window struggles
         const totalWords = (article.title + " " + article.description).split(/\s+/).length;
         if (totalWords < 40) return false;
 
@@ -95,15 +117,17 @@ class ArticleProcessor {
 
     private isFuzzyDuplicate(currentTitle: string, existingTitles: string[]): boolean {
         for (const existing of existingTitles) {
+            // Optimization: Skip if length difference is massive
             if (Math.abs(currentTitle.length - existing.length) > 20) continue;
-            // Simple Jaccard-like check for speed
+            
             const similarity = this.getSimilarityScore(currentTitle, existing);
+            // Threshold > 0.8 means 80% similar -> Duplicate
             if (similarity > 0.8) return true;
         }
         return false;
     }
 
-    // --- Helpers Inlined for Portability ---
+    // --- Helpers ---
 
     private cleanText(text: string): string {
         if (!text) return "";
@@ -119,6 +143,7 @@ class ArticleProcessor {
         return headline.split(' - ')[0].split(' | ')[0].trim();
     }
 
+    // Jaccard Similarity for fuzzy matching
     private getSimilarityScore(str1: string, str2: string): number {
         const s1 = str1.toLowerCase();
         const s2 = str2.toLowerCase();
@@ -127,8 +152,10 @@ class ArticleProcessor {
         const pairs1 = this.getPairs(s1);
         const pairs2 = this.getPairs(s2);
         const union = pairs1.size + pairs2.size;
-        let intersection = 0;
         
+        if (union === 0) return 0;
+
+        let intersection = 0;
         pairs1.forEach(pair => {
             if (pairs2.has(pair)) intersection++;
         });
