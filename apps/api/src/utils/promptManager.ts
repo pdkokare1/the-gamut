@@ -1,16 +1,13 @@
-// apps/api/src/utils/promptManager.ts
-import { prisma } from '@gamut/db';
-import { PromptType } from '@prisma/client';
-import redisHelper from './redis';
-import { logger } from './logger';
+import { prisma } from "@repo/db";
+import { redis } from "./redis";
+import logger from "./logger";
 
-// --- RICH DEFAULT PROMPTS (Strict Rules) ---
+// --- RICH DEFAULT PROMPTS ---
 
 const AI_PERSONALITY = {
     LENGTH_INSTRUCTION: "Minimum 50 words and Maximum 60 words", 
     TONE: "Objective, authoritative, and direct (News Wire Style)",
     BIAS_STRICTNESS: "Strict. Flag subtle framing, omission, and emotional language.",
-    // Specific words to avoid (Restored from old backend)
     FORBIDDEN_WORDS: "delves, underscores, crucial, tapestry, landscape, moreover, notably, the article, the report, the author, discusses, highlights, according to"
 };
 
@@ -119,30 +116,33 @@ Respond ONLY in valid JSON:
 }
 `;
 
-type ExtendedPromptType = PromptType | 'SUMMARY_ONLY';
-
 class PromptManager {
     
-    async getTemplate(type: ExtendedPromptType = PromptType.ANALYSIS): Promise<string> {
-        if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
-
+    async getTemplate(type: 'ANALYSIS' | 'GATEKEEPER' | 'ENTITY_EXTRACTION' | 'SUMMARY_ONLY' = 'ANALYSIS'): Promise<string> {
         const CACHE_KEY = `PROMPT_${type}`;
 
-        return await redisHelper.getOrFetch<string>(CACHE_KEY, async () => {
-            try {
-                const promptDoc = await prisma.prompt.findUnique({
-                    where: { type: type as PromptType }
-                });
+        try {
+            const cached = await redis.get(CACHE_KEY);
+            if (cached) return cached;
+        } catch (e) { /* Ignore Redis error */ }
 
-                if (promptDoc && promptDoc.active) {
-                    return promptDoc.text;
-                }
-            } catch (e: any) {
-                logger.warn(`⚠️ Prompt DB Fetch failed: ${e.message}`);
+        if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
+
+        try {
+            const doc = await prisma.prompt.findFirst({
+                where: { type, active: true },
+                orderBy: { version: 'desc' }
+            });
+
+            if (doc && doc.text) {
+                await redis.set(CACHE_KEY, doc.text, 'EX', 600); 
+                return doc.text;
             }
-            
-            return DEFAULT_ANALYSIS_PROMPT;
-        }, 600); 
+        } catch (e: any) {
+            logger.warn(`⚠️ Prompt DB Fetch failed: ${e.message}`);
+        }
+
+        return DEFAULT_ANALYSIS_PROMPT;
     }
 
     private interpolate(template: string, data: Record<string, string>): string {
@@ -152,14 +152,13 @@ class PromptManager {
     }
 
     public async getAnalysisPrompt(article: any, mode: 'Full' | 'Basic' = 'Full'): Promise<string> {
-        const templateType: ExtendedPromptType = mode === 'Basic' ? 'SUMMARY_ONLY' : PromptType.ANALYSIS;
-        
+        const templateType = mode === 'Basic' ? 'SUMMARY_ONLY' : 'ANALYSIS';
         const template = await this.getTemplate(templateType);
         
         const articleContent = article.summary || article.content || "";
         
         const data = {
-            headline: article.headline || article.title || "No Title",
+            headline: article.title || "No Title",
             description: article.description || "No Description",
             content: articleContent, 
             date: new Date().toISOString().split('T')[0]
