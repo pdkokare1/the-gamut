@@ -1,82 +1,22 @@
-// apps/api/src/services/ai.ts
-import { jsonrepair } from 'jsonrepair';
-import { z } from 'zod';
-import { logger } from '../utils/logger'; 
 import KeyManager from '../utils/KeyManager';
-import apiClient from '../utils/apiClient'; 
-import config from '../config'; 
-import AppError from '../utils/AppError';
+import logger from '../utils/logger';
+import { CONSTANTS } from '../utils/constants';
 import CircuitBreaker from '../utils/CircuitBreaker';
 import promptManager from '../utils/promptManager';
-import { CONSTANTS } from '../utils/constants'; 
+import AppError from '../utils/AppError';
+import { jsonrepair } from 'jsonrepair';
+import axios from 'axios';
+import { BasicAnalysisSchema, FullAnalysisSchema } from '../utils/validation';
 
-// --- Validation Schemas (Zod) ---
-const BasicAnalysisSchema = z.object({
-  summary: z.string(),
-  category: z.string(),
-  sentiment: z.enum(["Positive", "Negative", "Neutral"])
-});
+// Interfaces
+interface IGeminiResponse {
+  candidates?: {
+    content: {
+      parts: { text: string }[];
+    };
+  }[];
+}
 
-const FullAnalysisSchema = z.object({
-  summary: z.string(),
-  category: z.string(),
-  politicalLean: z.string(),
-  sentiment: z.enum(["Positive", "Negative", "Neutral"]),
-  biasScore: z.number(),
-  biasLabel: z.string().optional(),
-  credibilityScore: z.number(),
-  credibilityGrade: z.string().optional(),
-  reliabilityScore: z.number(),
-  reliabilityGrade: z.string().optional(),
-  trustLevel: z.string(),
-  clusterTopic: z.string().optional(),
-  country: z.string().optional(),
-  primaryNoun: z.string().optional(),
-  secondaryNoun: z.string().optional(),
-  keyFindings: z.array(z.string()),
-  recommendations: z.array(z.string()),
-  
-  biasComponents: z.object({
-    linguistic: z.object({ sentimentPolarity: z.number(), emotionalLanguage: z.number(), loadedTerms: z.number(), complexityBias: z.number() }),
-    sourceSelection: z.object({ sourceDiversity: z.number(), expertBalance: z.number(), attributionTransparency: z.number() }),
-    demographic: z.object({ genderBalance: z.number(), racialBalance: z.number(), ageRepresentation: z.number() }),
-    framing: z.object({ headlineFraming: z.number(), storySelection: z.number(), omissionBias: z.number() })
-  }).optional(),
-  
-  credibilityComponents: z.object({
-    sourceCredibility: z.number(),
-    factVerification: z.number(),
-    professionalism: z.number(),
-    evidenceQuality: z.number(),
-    transparency: z.number(),
-    audienceTrust: z.number()
-  }).optional(),
-
-  reliabilityComponents: z.object({
-    consistency: z.number(),
-    temporalStability: z.number(),
-    qualityControl: z.number(),
-    publicationStandards: z.number(),
-    correctionsPolicy: z.number(),
-    updateMaintenance: z.number()
-  }).optional()
-});
-
-const NarrativeSchema = z.object({
-    masterHeadline: z.string(),
-    executiveSummary: z.string(),
-    consensusPoints: z.array(z.string()),
-    divergencePoints: z.array(z.object({
-        point: z.string(),
-        perspectives: z.array(z.object({
-            source: z.string(),
-            stance: z.string()
-        }))
-    }))
-});
-
-// --- Constants ---
-const EMBEDDING_MODEL = CONSTANTS.AI_MODELS.EMBEDDING;
 const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
@@ -84,75 +24,85 @@ const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" }
 ];
 
+const NARRATIVE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    masterHeadline: { type: "STRING" },
+    executiveSummary: { type: "STRING" },
+    consensusPoints: { type: "ARRAY", items: { type: "STRING" } },
+    divergencePoints: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          point: { type: "STRING" },
+          perspectives: {
+             type: "ARRAY",
+             items: {
+                type: "OBJECT",
+                properties: { source: { type: "STRING" }, stance: { type: "STRING" } },
+                required: ["source", "stance"]
+             }
+          }
+        },
+        required: ["point", "perspectives"]
+      }
+    }
+  },
+  required: ["masterHeadline", "executiveSummary", "consensusPoints", "divergencePoints"]
+};
+
+// Helper to clean text
+function cleanText(text: string): string {
+    if (!text) return "";
+    return text.replace(/<[^>]*>?/gm, "")
+               .replace(/\r?\n|\r/g, " ")
+               .replace(/\s+/g, " ")
+               .trim();
+}
+
+const EMBEDDING_MODEL = "text-embedding-004";
+
 class AIService {
   constructor() {
-    // Initialize Keys from new config structure
-    if (config.keys?.gemini && config.keys.gemini.length > 0) {
-        KeyManager.registerProviderKeys('GEMINI', config.keys.gemini);
-    } else {
-        logger.warn("⚠️ No Gemini API Key found in config");
-    }
-    logger.info(`🤖 AI Service Initialized (Default: ${CONSTANTS.AI_MODELS.FAST})`);
+     // Initialization happens in index usually, but we ensure keys here if needed
+     logger.info(`🤖 AI Service Initialized`);
   }
 
-  // --- Helpers ---
-
-  private cleanText(text: string): string {
-    if (!text) return "";
-    return text.replace(/\s+/g, ' ').trim();
-  }
-
-  /**
-   * ⚡ Smart Context Optimization
-   * Restored specific junk phrase removal from old backend to save tokens and improve quality.
-   */
+  // Optimize text context
   private optimizeTextForTokenLimits(text: string, isProMode: boolean = false): string {
-      let clean = this.cleanText(text);
+      let clean = cleanText(text);
 
       const junkPhrases = [
           "Subscribe to continue reading", "Read more", "Sign up for our newsletter",
           "Follow us on", "© 2023", "© 2024", "© 2025", "All rights reserved",
-          "Click here", "Advertisement", "Supported by", "Terms of Service",
-          "Join our community", "Log in to comment"
+          "Click here", "Advertisement", "Supported by", "Terms of Service"
       ];
       junkPhrases.forEach(phrase => {
           clean = clean.replace(new RegExp(phrase, 'gi'), '');
       });
 
-      // Limits: Pro = 2M, Flash = 1M (Based on Constants)
-      const SAFE_LIMIT = isProMode ? CONSTANTS.AI_LIMITS.MAX_TOKENS_PRO : CONSTANTS.AI_LIMITS.MAX_TOKENS_FLASH;
+      const SAFE_LIMIT = isProMode ? 1500000 : 800000;
 
       if (clean.length > SAFE_LIMIT) {
-          logger.warn(`⚠️ Article extremely large (${clean.length} chars). Truncating to ${SAFE_LIMIT}.`);
-          return clean.substring(0, SAFE_LIMIT) + "\n\n[...Truncated due to extreme length...]";
+          logger.warn(`⚠️ Article extremely large. Truncating to ${SAFE_LIMIT}.`);
+          return clean.substring(0, SAFE_LIMIT) + "\n\n[...Truncated...]";
       }
-
       return clean;
   }
 
-  /**
-   * Smart Truncation
-   * Ensures fallbacks don't cut off in the middle of a sentence.
-   */
   private smartTruncate(text: string, targetWordCount: number): string {
       if (!text) return "";
       const words = text.split(/\s+/);
-      
       if (words.length <= targetWordCount + 10) return text;
-
       const truncated = words.slice(0, targetWordCount).join(' ');
       const lastDot = truncated.lastIndexOf('.');
-      
-      // If dot is reasonably far into the text, cut there. Otherwise just append ...
-      if (lastDot > targetWordCount * 0.5) { 
-          return truncated.substring(0, lastDot + 1);
-      }
+      if (lastDot > targetWordCount * 0.5) return truncated.substring(0, lastDot + 1);
       return truncated + "...";
   }
 
-  // --- Core Methods ---
-
-  async analyzeArticle(article: any, targetModel: string = CONSTANTS.AI_MODELS.FAST, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
+  // --- 1. SINGLE ARTICLE ANALYSIS ---
+  async analyzeArticle(article: any, targetModel: string = "gemini-2.0-flash-exp", mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
     if (!isSystemHealthy) {
         logger.warn('⚡ Circuit Breaker OPEN for Gemini. Using Fallback.');
@@ -162,30 +112,30 @@ class AIService {
     const isPro = targetModel.includes('pro');
     const optimizedArticle = {
         ...article,
-        // Apply strict cleaning before sending to AI
         summary: this.optimizeTextForTokenLimits(article.summary || article.content || "", isPro),
-        headline: article.headline ? this.cleanText(article.headline) : ""
+        headline: article.headline ? cleanText(article.headline) : ""
     };
     
-    // Safety check for empty content
-    if (!optimizedArticle.summary || optimizedArticle.summary.length < CONSTANTS.AI_LIMITS.MIN_CONTENT_CHARS) {
+    if (optimizedArticle.summary.length < 100) {
         return this.getFallbackAnalysis(article);
     }
 
     try {
         const prompt = await promptManager.getAnalysisPrompt(optimizedArticle, mode);
         
-        const data = await KeyManager.executeWithRetry<any>('GEMINI', async (apiKey) => {
+        const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-            const response = await apiClient.post<any>(url, {
+            const response = await axios.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS, 
                 generationConfig: {
                   responseMimeType: "application/json", 
+                  // @ts-ignore
+                  responseSchema: mode === 'Basic' ? BasicAnalysisSchema : FullAnalysisSchema,
                   temperature: 0.1, 
                   maxOutputTokens: 8192 
                 }
-            }, { timeout: CONSTANTS.TIMEOUTS.AI_GENERATION });
+            }, { timeout: 45000 });
             return response.data;
         });
 
@@ -199,41 +149,41 @@ class AIService {
     }
   }
 
+  // --- 2. MULTI-DOCUMENT NARRATIVE ---
   async generateNarrative(articles: any[]): Promise<any> {
       if (!articles || articles.length < 2) return null;
 
       try {
-          const targetModel = CONSTANTS.AI_MODELS.QUALITY;
+          const targetModel = "gemini-1.5-pro"; // Force Quality
 
           let docContext = "";
           articles.forEach((art, index) => {
               docContext += `\n--- SOURCE ${index + 1}: ${art.source} ---\n`;
               docContext += `HEADLINE: ${art.headline}\n`;
-              docContext += `TEXT: ${this.cleanText(art.summary)}\n`; 
+              docContext += `TEXT: ${cleanText(art.summary || art.content || "")}\n`; 
           });
 
           const prompt = `
-            You are an expert Chief Editor and Narrative Analyst.
-            Analyze the following ${articles.length} news reports on the same event.
-            Synthesize a "Master Narrative" highlighting consensus and divergence.
-            
-            OUTPUT JSON format matching schema: masterHeadline, executiveSummary, consensusPoints (string[]), divergencePoints ({point, perspectives: {source, stance}[]}).
+            You are an expert Chief Editor. Synthesize these reports.
             
             DOCUMENTS:
             ${docContext}
+            
+            OUTPUT:
+            Master Narrative with Consensus and Divergence.
           `;
 
-          const data = await KeyManager.executeWithRetry<any>('GEMINI', async (apiKey) => {
+          const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
               const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-              const response = await apiClient.post<any>(url, {
+              const response = await axios.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS,
                 generationConfig: {
                   responseMimeType: "application/json",
-                  temperature: 0.2, 
-                  maxOutputTokens: 8192
+                  responseSchema: NARRATIVE_SCHEMA,
+                  temperature: 0.2
                 }
-              }, { timeout: CONSTANTS.TIMEOUTS.NARRATIVE_GEN }); 
+              }, { timeout: 120000 }); 
               return response.data;
           });
           
@@ -246,11 +196,9 @@ class AIService {
       }
   }
 
+  // --- 3. BATCH EMBEDDINGS ---
   async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
-    const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
-    if (!isSystemHealthy) return null;
     if (!texts.length) return [];
-
     try {
         const BATCH_SIZE = 100;
         const allEmbeddings: number[][] = new Array(texts.length).fill([]);
@@ -258,13 +206,12 @@ class AIService {
 
         for (let i = 0; i < texts.length; i += BATCH_SIZE) {
              const chunk = texts.slice(i, i + BATCH_SIZE).map((text, idx) => ({
-                 text: this.cleanText(text).substring(0, 3000), 
+                 text: cleanText(text).substring(0, 3000), 
                  index: i + idx
              }));
              chunks.push(chunk);
         }
 
-        // Sequential processing to avoid rate limits
         for (const chunk of chunks) {
             const requests = chunk.map(item => ({
                 model: `models/${EMBEDDING_MODEL}`,
@@ -274,67 +221,37 @@ class AIService {
             try {
                 await KeyManager.executeWithRetry('GEMINI', async (apiKey) => {
                     const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${apiKey}`;
-                    const response = await apiClient.post<{ embeddings?: { values: number[] }[] }>(url, { requests }, { timeout: 45000 });
+                    const response = await axios.post<{ embeddings?: { values: number[] }[] }>(url, { requests }, { timeout: 45000 });
                     
                     if (response.data.embeddings) {
                         response.data.embeddings.forEach((emb, localIdx) => {
-                            const originalIndex = chunk[localIdx].index;
-                            allEmbeddings[originalIndex] = emb.values;
+                            allEmbeddings[chunk[localIdx].index] = emb.values;
                         });
                     }
                     return response.data;
                 });
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limit buffer
-
+                await new Promise(resolve => setTimeout(resolve, 1000));
             } catch (err: any) {
                 logger.warn(`Partial Batch Failure: ${err.message}`);
             }
         }
-
-        await CircuitBreaker.recordSuccess('GEMINI');
         return allEmbeddings.filter(e => e.length > 0);
-
     } catch (error: any) {
         logger.error(`Batch Embedding Error: ${error.message}`);
         return null;
     }
   }
 
-  async createEmbedding(text: string): Promise<number[] | null> {
+  // --- Private Helpers ---
+  private parseGeminiResponse(data: IGeminiResponse, mode: 'Full' | 'Basic' | 'Narrative', originalArticle: any | null): any {
     try {
-        const clean = this.cleanText(text).substring(0, 3000);
-        
-        const responseData = await KeyManager.executeWithRetry<{ embedding: { values: number[] } }>('GEMINI', async (apiKey) => {
-             const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`;
-             const res = await apiClient.post(url, {
-                model: `models/${EMBEDDING_MODEL}`,
-                content: { parts: [{ text: clean }] }
-             }, { timeout: 10000 });
-             return res.data;
-        });
-
-        return responseData.embedding.values;
-    } catch (error: any) {
-        logger.error(`Embedding Error: ${error.message}`);
-        return null; 
-    }
-  }
-
-  // --- Parsing & Fallback ---
-
-  private parseGeminiResponse(data: any, mode: string, originalArticle: any | null): any {
-    try {
-        if (!data.candidates || data.candidates.length === 0) throw new AppError('AI returned no candidates', 502);
-        
-        const rawText = data.candidates[0].content.parts[0].text;
+        const rawText = data.candidates?.[0]?.content.parts[0].text;
         if (!rawText) throw new AppError('AI returned empty content', 502);
 
         const cleanJson = jsonrepair(rawText);
         const parsedRaw = JSON.parse(cleanJson);
 
-        if (mode === 'Narrative') {
-            return NarrativeSchema.parse(parsedRaw); 
-        }
+        if (mode === 'Narrative') return parsedRaw;
 
         let validated;
         if (mode === 'Basic') {
@@ -353,16 +270,13 @@ class AIService {
 
     } catch (error: any) {
         logger.error(`AI Parse/Validation Error: ${error.message}`);
-        if (mode === 'Full' && originalArticle) {
-             logger.warn("Attempting Basic Fallback due to parsing error...");
-             return this.getFallbackAnalysis(originalArticle);
-        }
+        if (mode === 'Full' && originalArticle) return this.getFallbackAnalysis(originalArticle);
         throw new AppError(`Failed to parse AI response: ${error.message}`, 502);
     }
   }
 
   private getFallbackAnalysis(article: any): any {
-      const rawSummary = article.summary || article.content || "Analysis unavailable (System Error)";
+      const rawSummary = article.summary || article.content || "Analysis unavailable";
       return {
           summary: this.smartTruncate(rawSummary, 60),
           category: "Uncategorized",
