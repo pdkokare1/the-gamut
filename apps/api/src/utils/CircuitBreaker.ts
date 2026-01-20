@@ -1,53 +1,63 @@
 // apps/api/src/utils/CircuitBreaker.ts
-import redisHelper from './redis';
+import redis from './redis';
 import logger from './logger';
 
 /**
- * Standardized Circuit Breaker
- * Protects external APIs from cascading failures.
+ * Standardized Circuit Breaker to protect external APIs 
+ * from being hammered when they are down or rate-limited.
  */
 class CircuitBreaker {
     
-    // Checks if we should allow requests to this provider
+    /**
+     * Checks if the circuit is OPEN (Blocked).
+     * Returns TRUE if requests are allowed (Closed).
+     * Returns FALSE if requests are blocked (Open).
+     */
     async isOpen(provider: string): Promise<boolean> {
-        if (!redisHelper.isReady()) return true; // Fail open if Redis is down
+        // Fail open (allow traffic) if Redis is down/missing to prevent total blockage
+        if (!redis) return true; 
         
         const key = `breaker:open:${provider}`;
-        const isBlocked = await redisHelper.get(key);
+        const isBlocked = await redis.get(key);
         
-        // If key exists in Redis, it means breaker is OPEN (Blocked)
+        // If key exists, breaker is OPEN (Blocked).
         return !isBlocked; 
     }
 
-    // Records a failure. If threshold met, blocks provider.
+    /**
+     * Records a failure for a provider.
+     * If failures exceed the threshold, it opens the circuit.
+     */
     async recordFailure(provider: string, threshold: number = 3, cooldownSeconds: number = 1800) {
-        if (!redisHelper.isReady()) return;
+        if (!redis) return;
 
         const failKey = `breaker:fail:${provider}`;
         const openKey = `breaker:open:${provider}`;
 
         try {
-            const count = await redisHelper.incr(failKey);
+            // Increment failure count
+            const count = await redis.incr(failKey);
             
-            // Set window for failure counting (e.g., 10 mins)
-            if (count === 1) await redisHelper.expire(failKey, 600);
+            // Set a short expiry for the failure counter window (e.g., 10 mins)
+            if (count === 1) await redis.expire(failKey, 600);
 
+            // If failures exceed threshold, OPEN THE BREAKER
             if (count >= threshold) {
-                logger.error(`🔥 ${provider} failing repeatedly (${count}). Opening Breaker for ${cooldownSeconds}s.`);
-                // Set the blocking key
-                await redisHelper.set(openKey, '1', cooldownSeconds); 
-                // Reset failure counter
-                await redisHelper.del(failKey); 
+                logger.error(`🔥 ${provider} is failing repeatedly (${count} times). Opening Circuit Breaker for ${cooldownSeconds}s.`);
+                await redis.set(openKey, '1', 'EX', cooldownSeconds); 
+                await redis.del(failKey); // Reset counter
             }
         } catch (error: any) {
             logger.warn(`CircuitBreaker Error: ${error.message}`);
         }
     }
 
-    // Call this on success to reset the "wobble" counter
+    /**
+     * Resets the failure count. Call this on a successful request.
+     */
     async recordSuccess(provider: string) {
-        if (!redisHelper.isReady()) return;
-        await redisHelper.del(`breaker:fail:${provider}`);
+        if (!redis) return;
+        await redis.del(`breaker:fail:${provider}`);
     }
 }
 
