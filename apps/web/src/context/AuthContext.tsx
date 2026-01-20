@@ -1,3 +1,4 @@
+// apps/web/src/context/AuthContext.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { 
   User, 
@@ -11,9 +12,11 @@ import {
 import { auth, googleProvider } from '@/lib/firebase';
 import { trpc } from '@/utils/trpc';
 
+// Define the shape of the Context
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  isGuest: boolean; // RESTORED: Helper for UI locking
   login: (email: string, pass: string) => Promise<void>;
   signup: (email: string, pass: string) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
@@ -29,8 +32,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState<string | null>(null);
 
-  // TRPC Mutation to sync user to DB on login
-  const syncUser = trpc.profile.syncUser.useMutation();
+  // tRPC Utils to invalidate queries on login
+  const utils = trpc.useContext();
+
+  // Mutation to sync user to DB on login
+  const syncUser = trpc.profile.syncUser.useMutation({
+      onSuccess: () => {
+          // Refresh profile data once synced
+          utils.profile.get.invalidate(); 
+      }
+  });
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -40,8 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const t = await currentUser.getIdToken();
         setToken(t);
         
-        // Auto-sync user to backend DB
-        // This ensures the profile table exists for them
+        // Auto-sync user to backend DB (Idempotent)
         syncUser.mutate({
             email: currentUser.email || '',
             username: currentUser.displayName || currentUser.email?.split('@')[0] || 'User',
@@ -71,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     await signOut(auth);
+    utils.invalidate(); // Clear all tRPC cache on logout
   };
 
   const resetPassword = async (email: string) => {
@@ -78,7 +89,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, token, login, signup, loginWithGoogle, logout, resetPassword }}>
+    <AuthContext.Provider value={{ 
+        user, 
+        loading, 
+        token, 
+        isGuest: !user, // Derived state for easy use
+        login, 
+        signup, 
+        loginWithGoogle, 
+        logout, 
+        resetPassword 
+    }}>
       {children}
     </AuthContext.Provider>
   );
