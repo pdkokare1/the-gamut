@@ -1,74 +1,141 @@
 // apps/api/src/services/search.ts
 import { prisma } from '@gamut/db';
-import { Article } from '@gamut/db/types'; // Assuming types are generated or accessible
-import logger from '../utils/logger';
+import { logger } from '../utils/logger';
+import { redis } from '../utils/redis'; 
+import aiService from './ai'; 
+
+// Configuration
+const CACHE_TTL_SEARCH = 60 * 60; // 1 hour
 
 class SearchService {
   
   /**
-   * SMART SEARCH
-   * Attempts to use MongoDB Atlas Search (Fuzzy, Ranked).
-   * Falls back to Basic Search (Regex) if Atlas fails.
+   * Helper: Optimize Image URLs (Restored from old backend)
    */
-  async search(term: string, limit: number = 20) {
+  private optimizeImageUrl(url?: string): string | undefined {
+      if (!url) return undefined;
+      // Example: Cloudinary optimization
+      if (url.includes('cloudinary.com') && !url.includes('f_auto')) {
+          return url.replace('/upload/', '/upload/f_auto,q_auto,w_800/');
+      }
+      return url;
+  }
+
+  /**
+   * HYBRID SMART SEARCH
+   * 1. Redis Cache
+   * 2. Semantic Vector Search (AI)
+   * 3. Atlas Text Search (Fuzzy)
+   * 4. Basic Fallback (Regex)
+   */
+  async search(term: string, limit: number = 20, filters: any = {}) {
     if (!term || term.length < 2) return [];
 
-    try {
-      // 1. Try Atlas Search (Raw Aggregation)
-      // This requires a Search Index named "default" on your MongoDB Atlas collection
-      const rawResults = await prisma.article.aggregateRaw({
-        pipeline: [
-          {
-            $search: {
-              index: 'default', // Must match your Atlas Search Index name
-              text: {
-                query: term,
-                path: { wildcard: '*' }, // Search all fields
-                fuzzy: { maxEdits: 1 }   // Allow 1 typo
-              }
-            }
-          },
-          { $limit: limit },
-          {
-            $project: {
-              _id: 1,
-              id: { $toString: "$_id" }, // Remap _id to string id
-              headline: 1,
-              summary: 1,
-              url: 1,
-              imageUrl: 1,
-              source: 1,
-              category: 1,
-              publishedAt: { $dateToString: { date: "$publishedAt" } }, // Normalize date
-              score: { $meta: "searchScore" } // Include relevance score
-            }
-          }
-        ]
-      });
-
-      // 2. Parse Raw Results
-      // Prisma returns generic JSON, so we cast it safely
-      const results = rawResults as unknown as any[];
-      
-      if (Array.isArray(results) && results.length > 0) {
-        return results.map(r => ({
-            ...r,
-            publishedAt: new Date(r.publishedAt) // Ensure Date object
-        }));
-      }
-
-      // If Atlas returns empty (but didn't crash), user might be searching for something rare.
-      // We can try the basic search just in case, or just return empty.
-      // Let's return empty to respect the search engine's decision.
-      return [];
-
-    } catch (error) {
-      // 3. FALLBACK: Basic Search
-      // If Atlas fails (e.g., Index doesn't exist yet), use standard Prisma regex
-      // console.warn("Atlas Search failed, falling back to basic search:", error);
-      
-      return await this.basicFallback(term, limit);
+    // 1. Cache Check
+    const cacheKey = `search:v4:${term.toLowerCase().trim()}:${limit}:${JSON.stringify(filters)}`;
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+        return JSON.parse(cached);
     }
+
+    let results: any[] = [];
+    let searchMethod = 'Text';
+
+    try {
+      // 2. Try Semantic Vector Search (Preferred for conceptual matches)
+      const queryEmbedding = await aiService.createEmbedding(term);
+      
+      if (queryEmbedding && queryEmbedding.length > 0) {
+          // Note: This requires an Atlas Vector Search Index named "vector_index"
+          const rawVectorResults = await prisma.article.aggregateRaw({
+            pipeline: [
+                {
+                    $vectorSearch: {
+                        index: "vector_index",
+                        path: "embedding",
+                        queryVector: queryEmbedding,
+                        numCandidates: 100,
+                        limit: limit * 2
+                    }
+                },
+                { 
+                   $project: { 
+                      _id: 1, 
+                      id: { $toString: "$_id" },
+                      headline: 1, summary: 1, source: 1, category: 1,
+                      politicalLean: 1, url: 1, imageUrl: 1, publishedAt: { $dateToString: { date: "$publishedAt" } },
+                      score: { $meta: "vectorSearchScore" } 
+                   } 
+                }
+            ]
+          });
+
+          const vectorResults = rawVectorResults as unknown as any[];
+          if (vectorResults.length > 0) {
+              results = vectorResults;
+              searchMethod = 'Vector';
+          }
+      }
+    } catch (err) {
+      logger.warn(`⚠️ [Search] Vector search failed (falling back to text): ${err}`);
+    }
+
+    // 3. Fallback to Atlas Text Search (If Vector failed or returned nothing)
+    if (results.length === 0) {
+        try {
+            const rawTextResults = await prisma.article.aggregateRaw({
+                pipeline: [
+                  {
+                    $search: {
+                      index: 'default', 
+                      text: {
+                        query: term,
+                        path: { wildcard: '*' }, 
+                        fuzzy: { maxEdits: 1 }   
+                      }
+                    }
+                  },
+                  { $limit: limit },
+                  {
+                    $project: {
+                      _id: 1,
+                      id: { $toString: "$_id" },
+                      headline: 1, summary: 1, url: 1, imageUrl: 1, source: 1, category: 1,
+                      publishedAt: { $dateToString: { date: "$publishedAt" } },
+                      score: { $meta: "searchScore" }
+                    }
+                  }
+                ]
+            });
+            results = rawTextResults as unknown as any[];
+            searchMethod = 'Atlas Text';
+        } catch (err) {
+            logger.warn(`⚠️ [Search] Atlas Text search failed: ${err}`);
+        }
+    }
+
+    // 4. Ultimate Fallback: Basic Prisma Regex
+    if (results.length === 0) {
+        results = await this.basicFallback(term, limit);
+        searchMethod = 'Basic Regex';
+    }
+
+    // 5. Post-Processing (Optimization & Formatting)
+    const finalResults = results
+        .slice(0, limit)
+        .map(r => ({
+            ...r,
+            publishedAt: new Date(r.publishedAt),
+            imageUrl: this.optimizeImageUrl(r.imageUrl)
+        }));
+
+    // Cache the result
+    if (finalResults.length > 0) {
+        await redis.set(cacheKey, JSON.stringify(finalResults), 'EX', CACHE_TTL_SEARCH);
+    }
+
+    logger.info(`🔍 [Search] "${term}" | Method: ${searchMethod} | Results: ${finalResults.length}`);
+    return finalResults;
   }
 
   private async basicFallback(term: string, limit: number) {
@@ -83,15 +150,8 @@ class SearchService {
       take: limit,
       orderBy: { publishedAt: 'desc' },
       select: {
-          id: true,
-          headline: true,
-          summary: true,
-          url: true,
-          imageUrl: true,
-          source: true,
-          category: true,
-          publishedAt: true,
-          // Note: No 'score' available in fallback
+          id: true, headline: true, summary: true, url: true,
+          imageUrl: true, source: true, category: true, publishedAt: true
       }
     });
   }
