@@ -1,10 +1,13 @@
-import { prisma } from "@repo/db";
-import { redis } from "./redis";
-import logger from "./logger";
+// apps/api/src/utils/promptManager.ts
+
+import { prisma, PromptType } from '@gamut/db';
+import { redis } from './redis';
+import logger from './logger';
 
 // --- RICH DEFAULT PROMPTS ---
 
 const AI_PERSONALITY = {
+    // UPDATED: Explicit Min/Max instruction
     LENGTH_INSTRUCTION: "Minimum 50 words and Maximum 60 words", 
     TONE: "Objective, authoritative, and direct (News Wire Style)",
     BIAS_STRICTNESS: "Strict. Flag subtle framing, omission, and emotional language.",
@@ -116,32 +119,48 @@ Respond ONLY in valid JSON:
 }
 `;
 
+// Helper type to handle the loose strings vs Enum
+type TemplateType = 'SUMMARY_ONLY' | keyof typeof PromptType;
+
 class PromptManager {
     
-    async getTemplate(type: 'ANALYSIS' | 'GATEKEEPER' | 'ENTITY_EXTRACTION' | 'SUMMARY_ONLY' = 'ANALYSIS'): Promise<string> {
+    async getTemplate(type: TemplateType = 'ANALYSIS'): Promise<string> {
         const CACHE_KEY = `PROMPT_${type}`;
 
+        // 1. Check Redis
         try {
             const cached = await redis.get(CACHE_KEY);
             if (cached) return cached;
         } catch (e) { /* Ignore Redis error */ }
 
+        // 2. Handle non-DB hardcoded types
         if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
 
+        // 3. Check Database (Prisma)
         try {
+            // Safe cast: We know at this point 'type' must be a valid Enum key
+            const dbType = type as PromptType; 
+
             const doc = await prisma.prompt.findFirst({
-                where: { type, active: true },
-                orderBy: { version: 'desc' }
+                where: { 
+                    type: dbType, 
+                    active: true 
+                },
+                orderBy: { 
+                    version: 'desc' 
+                }
             });
 
             if (doc && doc.text) {
-                await redis.set(CACHE_KEY, doc.text, 'EX', 600); 
+                // Cache for 10 minutes
+                await redis.set(CACHE_KEY, doc.text, 600); 
                 return doc.text;
             }
         } catch (e: any) {
             logger.warn(`⚠️ Prompt DB Fetch failed: ${e.message}`);
         }
 
+        // 4. Fallback
         return DEFAULT_ANALYSIS_PROMPT;
     }
 
@@ -152,7 +171,7 @@ class PromptManager {
     }
 
     public async getAnalysisPrompt(article: any, mode: 'Full' | 'Basic' = 'Full'): Promise<string> {
-        const templateType = mode === 'Basic' ? 'SUMMARY_ONLY' : 'ANALYSIS';
+        const templateType: TemplateType = mode === 'Basic' ? 'SUMMARY_ONLY' : 'ANALYSIS';
         const template = await this.getTemplate(templateType);
         
         const articleContent = article.summary || article.content || "";
