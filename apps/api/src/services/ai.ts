@@ -1,4 +1,5 @@
 // apps/api/src/services/ai.ts
+
 import axios from 'axios';
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
@@ -27,7 +28,7 @@ export interface IGeminiResponse {
   }[];
 }
 
-// --- VALIDATION SCHEMAS (Zod) ---
+// --- VALIDATION SCHEMAS (Zod - Type Safe) ---
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
@@ -229,7 +230,8 @@ class AIService {
    * --- 3. BATCH EMBEDDINGS ---
    */
   async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
-    if (await CircuitBreaker.isOpen('GEMINI') === false) return null;
+    const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
+    if (!isSystemHealthy) return null;
     if (!texts.length) return [];
 
     try {
@@ -276,6 +278,34 @@ class AIService {
     } catch (error: any) {
         logger.error(`Batch Embedding Error: ${error.message}`);
         return null;
+    }
+  }
+
+  /**
+   * --- 4. SINGLE EMBEDDING (RESTORED) ---
+   * Crucial for Search Features in article-service.ts
+   */
+  async createEmbedding(text: string): Promise<number[] | null> {
+    const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
+    if (!isSystemHealthy) return null;
+
+    try {
+        const clean = this.cleanText(text).substring(0, 3000);
+
+        const responseData = await KeyManager.executeWithRetry<{ embedding: { values: number[] } }>('GEMINI', async (apiKey) => {
+             const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`;
+             const res = await axios.post(url, {
+                model: `models/${EMBEDDING_MODEL}`,
+                content: { parts: [{ text: clean }] }
+             }, { timeout: 10000 });
+             return res.data;
+        });
+
+        return responseData.embedding.values;
+
+    } catch (error: any) {
+        logger.error(`Embedding Error: ${error.message}`);
+        return null; 
     }
   }
 
