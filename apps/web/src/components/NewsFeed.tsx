@@ -1,226 +1,229 @@
-import { useState, useRef, useEffect } from 'react';
-import { useInView } from 'react-intersection-observer';
+import React, { useState, useEffect, TouchEvent } from 'react';
 import { trpc } from '../utils/trpc';
-import { useHaptic } from '../hooks/use-haptic';
-import { cn } from '../lib/utils';
-import { ArticleCard } from './ArticleCard';
-import { Loader2, RefreshCcw, WifiOff, Lock } from 'lucide-react';
-import { Button } from './ui/button';
 import { useAuth } from '../context/AuthContext';
-// import { LoginModal } from './modals/LoginModal'; // Ensure this exists in your new structure
+import { useInView } from 'react-intersection-observer';
+import { FeedItem } from './FeedItem';
+import { LoginModal } from './modals/LoginModal'; // Restored
+import { NarrativeModal } from './modals/NarrativeModal'; // Restored
+import { SkeletonCard } from './ui/card'; // Assuming you have a skeleton or use generic div
+import { Button } from './ui/button';
+import { cn } from '../lib/utils';
 
-// Types
-type FeedMode = 'latest' | 'infocus' | 'balanced';
+type FeedTab = 'latest' | 'infocus' | 'balanced';
 
-export function NewsFeed() {
-  const [mode, setMode] = useState<FeedMode>('latest');
+export default function NewsFeed() {
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState<FeedTab>('latest');
   const [showLoginModal, setShowLoginModal] = useState(false);
-  
-  const vibrate = useHaptic();
-  const { user, isGuest } = useAuth(); // Assuming useAuth provides user/isGuest
-  
-  // Swipe References
-  const touchStart = useRef<number | null>(null);
-  const touchEnd = useRef<number | null>(null);
+  const [selectedNarrativeId, setSelectedNarrativeId] = useState<string | null>(null);
+
+  // --- 1. Swipe Logic (Restored) ---
+  const [touchStart, setTouchStart] = useState<number | null>(null);
+  const [touchEnd, setTouchEnd] = useState<number | null>(null);
   const minSwipeDistance = 50;
 
-  // --- 1. DATA FETCHING ---
-  const getFilterForMode = (m: FeedMode) => {
-    switch (m) {
-      case 'balanced': 
-        // Balanced feed is handled by a separate endpoint in the Router, 
-        // but if we use the unified getFeed, we might need specific params.
-        // However, we added getBalancedFeed to the router.
-        // We will switch the query based on mode below.
-        return {}; 
-      case 'infocus': 
-        // 'InFocus' usually implies Narratives or specific clusters.
-        // We can use a filter or a different router call.
-        return { category: 'Narratives' }; 
-      default: 
-        return {};
-    }
+  const onTouchStart = (e: TouchEvent) => {
+    setTouchEnd(null);
+    setTouchStart(e.targetTouches[0].clientX);
   };
 
-  // We use the standard feed for Latest & InFocus
-  const mainFeedQuery = trpc.article.getFeed.useInfiniteQuery(
-    { 
-      limit: 10,
-      ...getFilterForMode(mode)
-    },
-    {
-      getNextPageParam: (lastPage) => lastPage.nextCursor,
-      enabled: mode !== 'balanced', // Disable this query for balanced mode
-      refetchOnWindowFocus: false,
-    }
-  );
-
-  // We use the specific balanced feed endpoint for Balanced mode
-  // Note: Infinite scroll might be different for Balanced if it returns a fixed set
-  const balancedFeedQuery = trpc.article.getBalancedFeed.useQuery(
-    { limit: 5 },
-    { enabled: mode === 'balanced' }
-  );
-
-  // Normalize data access
-  const articles = mode === 'balanced' 
-    ? (balancedFeedQuery.data || []) 
-    : (mainFeedQuery.data?.pages.flatMap((page) => page.items) || []);
-
-  const isLoading = mode === 'balanced' ? balancedFeedQuery.isLoading : mainFeedQuery.isLoading;
-  const isError = mode === 'balanced' ? balancedFeedQuery.isError : mainFeedQuery.isError;
-  const isRefetching = mode === 'balanced' ? balancedFeedQuery.isRefetching : mainFeedQuery.isRefetching;
-  const refetch = mode === 'balanced' ? balancedFeedQuery.refetch : mainFeedQuery.refetch;
-
-  // --- 2. INFINITE SCROLL (Only for Main Feed) ---
-  const { ref, inView } = useInView();
-  useEffect(() => {
-    if (inView && mode !== 'balanced' && mainFeedQuery.hasNextPage) {
-      mainFeedQuery.fetchNextPage();
-    }
-  }, [inView, mode, mainFeedQuery]);
-
-  // --- 3. INTERACTION HANDLERS ---
-
-  const handleModeChange = (newMode: FeedMode) => {
-    if (mode === newMode) return;
-    vibrate();
-
-    // Guest Protection for Balanced Mode
-    if (newMode === 'balanced' && (!user || isGuest)) {
-        setShowLoginModal(true);
-        return;
-    }
-
-    setMode(newMode);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const onTouchStart = (e: React.TouchEvent) => {
-    touchEnd.current = null;
-    touchStart.current = e.targetTouches[0].clientX;
-  };
-
-  const onTouchMove = (e: React.TouchEvent) => {
-    touchEnd.current = e.targetTouches[0].clientX;
-  };
+  const onTouchMove = (e: TouchEvent) => setTouchEnd(e.targetTouches[0].clientX);
 
   const onTouchEnd = () => {
-    if (!touchStart.current || !touchEnd.current) return;
-    const distance = touchStart.current - touchEnd.current;
+    if (!touchStart || !touchEnd) return;
+    const distance = touchStart - touchEnd;
     const isLeftSwipe = distance > minSwipeDistance;
     const isRightSwipe = distance < -minSwipeDistance;
 
     if (isLeftSwipe) {
-      if (mode === 'latest') handleModeChange('infocus');
-      else if (mode === 'infocus') handleModeChange('balanced');
+      if (activeTab === 'latest') handleTabChange('infocus');
+      else if (activeTab === 'infocus') handleTabChange('balanced');
     }
     if (isRightSwipe) {
-      if (mode === 'balanced') handleModeChange('infocus');
-      else if (mode === 'infocus') handleModeChange('latest');
+      if (activeTab === 'balanced') handleTabChange('infocus');
+      else if (activeTab === 'infocus') handleTabChange('latest');
+    }
+  };
+
+  // --- 2. Tab Switching with Gatekeeper ---
+  const handleTabChange = (tab: FeedTab) => {
+    if (tab === 'balanced' && !user) {
+      setShowLoginModal(true);
+      return;
+    }
+    setActiveTab(tab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // --- 3. Data Fetching (tRPC + Infinite) ---
+  // A. Latest Feed
+  const latestQuery = trpc.article.getFeed.useInfiniteQuery(
+    { limit: 10 },
+    { 
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: activeTab === 'latest' 
+    }
+  );
+
+  // B. Balanced Feed (Only fetches if user exists)
+  const balancedQuery = trpc.article.getBalancedFeed.useInfiniteQuery(
+    { limit: 10 },
+    { 
+      getNextPageParam: (lastPage) => lastPage.nextCursor,
+      enabled: activeTab === 'balanced' && !!user 
+    }
+  );
+
+  // C. In Focus (Narratives)
+  const narrativeQuery = trpc.article.getInFocusFeed.useQuery(
+    undefined, 
+    { enabled: activeTab === 'infocus' }
+  );
+
+  // --- 4. Infinite Scroll Trigger ---
+  const { ref, inView } = useInView();
+  
+  useEffect(() => {
+    if (inView) {
+      if (activeTab === 'latest' && latestQuery.hasNextPage) {
+        latestQuery.fetchNextPage();
+      } else if (activeTab === 'balanced' && balancedQuery.hasNextPage) {
+        balancedQuery.fetchNextPage();
+      }
+    }
+  }, [inView, activeTab, latestQuery.hasNextPage, balancedQuery.hasNextPage]);
+
+
+  // --- Helper to Render Content ---
+  const renderContent = () => {
+    // 1. Loading States
+    if (
+      (activeTab === 'latest' && latestQuery.isLoading) ||
+      (activeTab === 'infocus' && narrativeQuery.isLoading) ||
+      (activeTab === 'balanced' && balancedQuery.isLoading)
+    ) {
+      return (
+        <div className="space-y-4 pt-4">
+           {[...Array(3)].map((_, i) => (
+             <div key={i} className="h-64 w-full animate-pulse bg-gray-200 dark:bg-gray-800 rounded-xl" />
+           ))}
+        </div>
+      );
+    }
+
+    // 2. Error States
+    if (latestQuery.isError || narrativeQuery.isError || balancedQuery.isError) {
+      return (
+        <div className="text-center py-10 text-red-500">
+          <p>Unable to load feed. Please try again.</p>
+          <Button onClick={() => window.location.reload()} variant="outline" className="mt-4">
+            Retry
+          </Button>
+        </div>
+      );
+    }
+
+    // 3. Render Items
+    if (activeTab === 'latest') {
+      return (
+        <div className="space-y-4 pt-4">
+          {latestQuery.data?.pages.map((page, i) => (
+            <React.Fragment key={i}>
+              {page.items.map((item) => (
+                <FeedItem key={item.id} article={item} onClick={() => {}} />
+              ))}
+            </React.Fragment>
+          ))}
+          <div ref={ref} className="h-10 w-full flex justify-center items-center text-gray-400 text-sm">
+             {latestQuery.isFetchingNextPage ? 'Loading more...' : ''}
+          </div>
+        </div>
+      );
+    }
+
+    if (activeTab === 'infocus') {
+      return (
+        <div className="space-y-4 pt-4">
+          {narrativeQuery.data?.map((narrative) => (
+             // Special styling for Narrative Cards
+             <div 
+               key={narrative.id} 
+               onClick={() => setSelectedNarrativeId(narrative.id)}
+               className="cursor-pointer"
+             >
+                <FeedItem 
+                  article={{...narrative, source: 'Narrative', url: ''}} // Adapter for FeedItem
+                  isNarrative={true}
+                />
+             </div>
+          ))}
+          {(!narrativeQuery.data || narrativeQuery.data.length === 0) && (
+             <div className="text-center py-10 text-gray-500">No narratives in focus right now.</div>
+          )}
+        </div>
+      );
+    }
+
+    if (activeTab === 'balanced') {
+      return (
+         <div className="space-y-4 pt-4">
+          {balancedQuery.data?.pages.map((page, i) => (
+            <React.Fragment key={i}>
+              {page.items.map((item) => (
+                <FeedItem key={item.id} article={item} isBalanced={true} onClick={() => {}} />
+              ))}
+            </React.Fragment>
+          ))}
+           <div ref={ref} className="h-10" />
+        </div>
+      );
     }
   };
 
   return (
     <div 
-      className="min-h-screen pb-20 touch-pan-y"
+      className="min-h-screen pb-20"
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
     >
-      {/* --- NAVIGATION TABS --- */}
-      <div className="sticky top-16 z-30 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b w-full mb-6">
-        <div className="flex justify-center p-2">
-          <div className="flex items-center bg-muted/50 p-1 rounded-full border shadow-sm">
-            {[
-              { id: 'latest', label: 'Latest' },
-              { id: 'infocus', label: 'Narratives' }, // Restored Name
-              { id: 'balanced', label: 'Balanced' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => handleModeChange(tab.id as FeedMode)}
-                className={cn(
-                  "px-6 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 flex items-center gap-1.5",
-                  mode === tab.id
-                    ? "bg-primary text-primary-foreground shadow-md scale-105"
-                    : "text-muted-foreground hover:text-foreground hover:bg-background/50"
-                )}
-              >
-                {tab.label}
-                {/* Lock Icon for Guests on Balanced Tab */}
-                {tab.id === 'balanced' && (!user || isGuest) && (
-                    <Lock className="w-3 h-3 opacity-70" />
-                )}
-              </button>
-            ))}
-          </div>
+      {/* Sticky Tabs */}
+      <div className="sticky top-16 z-30 bg-white/80 dark:bg-black/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800">
+        <div className="flex justify-around p-2">
+          {['latest', 'infocus', 'balanced'].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => handleTabChange(tab as FeedTab)}
+              className={cn(
+                "px-4 py-2 text-sm font-medium rounded-full transition-all duration-200",
+                activeTab === tab 
+                  ? "bg-blue-600 text-white shadow-md" 
+                  : "text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+              )}
+            >
+              {tab === 'infocus' ? 'In Focus' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* --- CONTENT AREA --- */}
-      <div className="container max-w-2xl mx-auto px-4 space-y-6">
-        
-        {/* Loading State */}
-        {(isLoading || isRefetching) && articles.length === 0 && (
-          <div className="space-y-6 pt-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="h-64 rounded-xl bg-muted/50 animate-pulse" />
-            ))}
-          </div>
-        )}
-
-        {/* Error State */}
-        {isError && (
-          <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
-            <WifiOff className="h-12 w-12 text-muted-foreground opacity-20" />
-            <div className="space-y-2">
-              <h3 className="font-semibold">Connection Issue</h3>
-              <p className="text-sm text-muted-foreground">We couldn't load the feed.</p>
-            </div>
-            <Button onClick={() => refetch()} variant="outline" size="sm" className="gap-2">
-              <RefreshCcw className="h-4 w-4" /> Try Again
-            </Button>
-          </div>
-        )}
-
-        {/* Empty State */}
-        {!isLoading && !isError && articles.length === 0 && (
-          <div className="text-center py-20 text-muted-foreground">
-            <p>No articles found for this section yet.</p>
-          </div>
-        )}
-
-        {/* Article List */}
-        <div className={cn(
-            "transition-opacity duration-300",
-            isRefetching ? "opacity-50" : "opacity-100"
-        )}>
-            {articles.map((article) => (
-              <ArticleCard key={article.id} article={article} />
-            ))}
-        </div>
-
-        {/* Infinite Scroll Loader (Only for Main/InFocus) */}
-        {mode !== 'balanced' && (
-            <div ref={ref} className="flex justify-center py-8">
-            {mainFeedQuery.isFetchingNextPage ? (
-                <Loader2 className="h-6 w-6 animate-spin text-primary" />
-            ) : mainFeedQuery.hasNextPage ? (
-                <span className="text-xs text-muted-foreground">Scroll for more</span>
-            ) : articles.length > 0 ? (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <div className="h-px w-8 bg-border" />
-                    <span>End of Stream</span>
-                    <div className="h-px w-8 bg-border" />
-                </div>
-            ) : null}
-            </div>
-        )}
+      {/* Main Content */}
+      <div className="px-4 max-w-2xl mx-auto">
+        {renderContent()}
       </div>
 
-      {/* Placeholder for Login Modal - You can implement or import your existing one */}
-      {/* <LoginModal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} /> */}
+      {/* Modals */}
+      <LoginModal 
+        isOpen={showLoginModal} 
+        onClose={() => setShowLoginModal(false)} 
+      />
+      
+      {selectedNarrativeId && (
+        <NarrativeModal 
+          narrativeId={selectedNarrativeId} 
+          onClose={() => setSelectedNarrativeId(null)}
+        />
+      )}
     </div>
   );
 }
