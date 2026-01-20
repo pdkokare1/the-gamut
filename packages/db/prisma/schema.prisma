@@ -1,3 +1,5 @@
+// packages/db/prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -35,7 +37,7 @@ model Article {
   biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
-  
+
   credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
@@ -59,11 +61,11 @@ model Article {
   primaryNoun    String?
   secondaryNoun  String?
   
-  // Feed Optimization
+  // Feed Optimization (Hides older versions of same story)
   isLatest       Boolean @default(true)
   
   // -- Vector Data --
-  // Note: We will exclude this field in API calls via "select" to save bandwidth
+  // We exclude this in API calls to save bandwidth
   embedding      Float[]
   
   keyFindings     String[]
@@ -79,23 +81,21 @@ model Article {
   activityLogs      ActivityLog[]
 
   // -- Indexes --
-  // 1. Standard Field Indexes (Restored from Mongoose)
+  // 1. Standard Field Indexes
   @@index([source])
   @@index([trustScore])
   @@index([clusterId])
   @@index([country])
-  
-  // Restored single-field indexes to match Mongoose config
   @@index([category])
   @@index([politicalLean])
   @@index([isLatest])
 
   // 2. Compound Indexes (Performance Boosters)
-  // A. "For You" Feed
+  // A. "For You" Feed: Filter by Category + Lean + Date + Latest Only
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) 
-  // B. "Trusted News" Feed
+  // B. "Trusted News" Feed: Filter by Lean + High Trust + Date
   @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])         
-  // C. "Cluster View"
+  // C. "Cluster View": Quickly find all articles in a specific event
   @@index([clusterId, publishedAt(sort: Desc)])            
   // D. "Regional News"
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       
@@ -122,6 +122,7 @@ model Narrative {
 
   category         String?
   country          String?
+  
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -136,7 +137,7 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique 
   
-  // Sparse indexes (Mongoose sparse:true maps to nullable unique in Prisma/Mongo)
+  // Sparse indexes for Auth
   email                 String?  @unique
   phoneNumber           String?  @unique
   username              String   @unique
@@ -180,9 +181,8 @@ model UserStats {
   averageAttentionSpan  Int      @default(0) 
   
   leanExposure          LeanExposure?
-
+  
   // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
-  // Mongoose: Map<String, Number> -> Prisma: Json
   topicInterest         Json?
   
   engagementScore       Float    @default(50)
@@ -261,8 +261,6 @@ model Cache {
   data        Json
   expiresAt   DateTime 
   createdAt   DateTime @default(now())
-  // Note: MongoDB TTL index must be managed manually or via Mongo Driver, 
-  // Prisma does not yet support `expireAfterSeconds` natively.
   
   @@map("cache")
 }
