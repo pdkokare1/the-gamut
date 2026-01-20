@@ -128,7 +128,7 @@ const deduplicateTopics = (rawTopics: TopicResult[]) => {
 class ArticleService {
 
   // --- 1. Smart Trending Topics (72h + Hybrid Dedupe) ---
-  async getTrendingTopics() {
+  async getTrendingTopics(limit: number = 12) {
     // CACHE BUST: 'v12-prisma'
     return redis.getOrFetch(
       'trending_topics_v12_prisma',
@@ -178,29 +178,29 @@ class ArticleService {
 
         return cleanList
           .sort((a, b) => b.count - a.count)
-          .slice(0, 12)
+          .slice(0, limit)
           .map(({ vector, latestDate, ...rest }) => rest);
       },
       CONSTANTS.CACHE.TTL_TRENDING
     );
   }
 
-  // --- 2. Intelligent Search (Vector + Text Fallback) ---
+  // --- 2. Intelligent Search (Vector + Atlas + Standard Text Fallback) ---
   async searchArticles(query: string, limit: number = 12) {
     if (!query) return { articles: [], total: 0 };
 
     const safeQuery = query.replace(/[^\w\s\-\.\?]/gi, '');
-    const CACHE_KEY = `search:v3:${safeQuery.toLowerCase().trim()}:${limit}`;
+    const CACHE_KEY = `search:v4:${safeQuery.toLowerCase().trim()}:${limit}`;
 
     return redis.getOrFetch(CACHE_KEY, async () => {
       let articles: any[] = [];
       let searchMethod = 'Text';
 
+      // A. Try Semantic Vector Search (Best for "Concept" matches)
       try {
         const queryEmbedding = await aiService.createEmbedding(safeQuery);
 
         if (queryEmbedding && queryEmbedding.length > 0) {
-          // Vector Search using aggregateRaw
           const rawVectorResults = await prisma.article.aggregateRaw({
             pipeline: [
               {
@@ -229,38 +229,71 @@ class ArticleService {
           });
           
           articles = rawVectorResults as any[];
-          searchMethod = 'Vector';
+          if (articles.length > 0) searchMethod = 'Vector';
         }
       } catch (err) {
         logger.warn(`Semantic Search Failed (Fallback to Text): ${err}`);
       }
 
+      // B. Fallback to Atlas Text Search (Best for Fuzzy Typo Tolerance)
       if (!articles.length) {
-        // Fallback to Atlas Text Search via aggregateRaw
-        const rawTextResults = await prisma.article.aggregateRaw({
-          pipeline: [
-            {
-              $search: {
-                index: 'default',
-                text: {
-                  query: safeQuery,
-                  path: { wildcard: '*' },
-                  fuzzy: { maxEdits: 1 }
+        try {
+          const rawTextResults = await prisma.article.aggregateRaw({
+            pipeline: [
+              {
+                $search: {
+                  index: 'default',
+                  text: {
+                    query: safeQuery,
+                    path: { wildcard: '*' },
+                    fuzzy: { maxEdits: 1 }
+                  }
                 }
+              },
+              { $limit: limit },
+              {
+                 $project: {
+                    "_id": 1, "id": { "$toString": "$_id" },
+                    "headline": 1, "summary": 1, "source": 1, "category": 1, 
+                    "politicalLean": 1, "url": 1, "imageUrl": 1, "publishedAt": 1,
+                    "score": { "$meta": "searchScore" }
+                 }
               }
-            },
-            { $limit: limit },
-            {
-               $project: {
-                  "_id": 1, "id": { "$toString": "$_id" },
-                  "headline": 1, "summary": 1, "source": 1, "category": 1, 
-                  "url": 1, "imageUrl": 1, "publishedAt": 1,
-                  "score": { "$meta": "searchScore" }
-               }
-            }
-          ]
-        });
-        articles = rawTextResults as any[];
+            ]
+          });
+          articles = rawTextResults as any[];
+          if (articles.length > 0) searchMethod = 'Atlas';
+        } catch (err) {
+          logger.warn(`Atlas Search Failed (Fallback to Standard): ${err}`);
+        }
+      }
+
+      // C. Ultimate Fallback: Standard MongoDB Text Search (Regex/Basic)
+      // This replicates the old articleModel.ts 'Option B' behavior
+      if (!articles.length) {
+         try {
+             const rawStandardResults = await prisma.article.findMany({
+                 where: {
+                     OR: [
+                         { headline: { contains: safeQuery, mode: 'insensitive' } },
+                         { summary: { contains: safeQuery, mode: 'insensitive' } },
+                         { clusterTopic: { contains: safeQuery, mode: 'insensitive' } }
+                     ]
+                 },
+                 take: limit,
+                 orderBy: { publishedAt: 'desc' }
+             });
+             
+             // Convert Prisma Objects to match Raw shape
+             articles = rawStandardResults.map(a => ({
+                 ...a,
+                 id: a.id, // Prisma already handles _id -> id
+                 publishedAt: a.publishedAt.toISOString() // Normalize date for mapping below
+             }));
+             searchMethod = 'Standard';
+         } catch (err) {
+             logger.error(`All Search Methods Failed: ${err}`);
+         }
       }
 
       // Final mapping to ensure Dates and Images are correct
@@ -277,7 +310,7 @@ class ArticleService {
   }
 
   // --- 3. Weighted Merge Main Feed (Triple Zone) ---
-  async getMainFeed(filters: FeedFilters, userId?: string) {
+  async getWeightedFeed(filters: FeedFilters, userProfile?: any) {
     const { offset = 0, limit = 20, topic } = filters;
     const page = Number(offset);
 
@@ -301,7 +334,6 @@ class ArticleService {
         orderBy: { publishedAt: 'desc' },
         skip: page,
         take: Number(limit),
-        select: { embedding: false, recommendations: false } // Exclude heavy fields
       });
 
       return {
@@ -344,13 +376,13 @@ class ArticleService {
     if (filters.politicalLean) initialWhere.politicalLean = filters.politicalLean;
 
     // Fetch Candidates and User Data Parallelly
-    const [latestCandidates, userProfile, userStats] = await Promise.all([
+    const userId = userProfile?.userId;
+    const [latestCandidates, userStats] = await Promise.all([
       prisma.article.findMany({
         where: initialWhere,
         orderBy: { publishedAt: 'desc' },
         take: 80,
       }),
-      userId ? prisma.profile.findUnique({ where: { userId }, select: { userEmbedding: true } }) : null,
       userId ? prisma.userStats.findUnique({ where: { userId }, select: { leanExposure: true, topicInterest: true } }) : null
     ]);
 
@@ -473,9 +505,9 @@ class ArticleService {
   }
 
   // --- 5. Balanced Feed (Anti-Echo Chamber) ---
-  async getBalancedFeed(userId: string) {
+  async getBalancedFeed(userId: string, limit: number = 20) {
     if (!userId) {
-      const feed = await this.getMainFeed({ limit: 20 });
+      const feed = await this.getWeightedFeed({ limit: limit });
       return {
         articles: feed.articles,
         meta: { reason: "Trending Headlines" }
@@ -514,7 +546,7 @@ class ArticleService {
         { trustScore: 'desc' },
         { publishedAt: 'desc' }
       ],
-      take: 20,
+      take: limit,
       select: { embedding: false }
     });
 
@@ -657,6 +689,25 @@ class ArticleService {
 
     return { message, savedArticles: updatedProfile?.savedArticleIds || [] };
   }
+
+  // --- 9. Smart Briefing (Placeholder for AI Summary) ---
+  async getSmartBriefing(articleId: string) {
+    // This connects to your aiService
+    return aiService.generateBriefing(articleId);
+  }
+
+  // --- 10. Admin Ops ---
+  async createArticle(data: any) {
+    return prisma.article.create({ data });
+  }
+
+  async updateArticle(id: string, data: any) {
+    return prisma.article.update({ where: { id }, data });
+  }
+
+  async deleteArticle(id: string) {
+    return prisma.article.delete({ where: { id } });
+  }
 }
 
-export const articleService = new ArticleService();
+export const feedService = new ArticleService();
