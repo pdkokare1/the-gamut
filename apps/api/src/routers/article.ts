@@ -21,6 +21,7 @@ export const articleRouter = router({
       source: z.string().optional(),
       country: z.string().optional(),
       topic: z.string().optional(),
+      sort: z.string().optional(), // RESTORED: Needed for "Sort by Latest/Relevant"
       startDate: z.string().optional(), // ISO Date String
       endDate: z.string().optional()    // ISO Date String
     }))
