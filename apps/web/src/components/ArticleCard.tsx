@@ -1,16 +1,24 @@
-// apps/web/src/components/ArticleCard.tsx
 import React, { useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
-import { Play, Pause, Bookmark, Share2, ExternalLink, Sparkles } from 'lucide-react';
+import { 
+  Play, 
+  Pause, 
+  Bookmark, 
+  BookmarkCheck, 
+  Share2, 
+  MoreHorizontal, 
+  ShieldCheck, 
+  AlertTriangle 
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { useAudio } from '@/context/AudioContext'; // We will build this next
 import { useAuth } from '@/context/AuthContext';
-import { useAudio } from '@/context/AudioContext';
 import { trpc } from '@/utils/trpc';
-import { Button } from './ui/button';
-import { Badge } from './ui/badge';
-import { toast } from 'sonner';
-import { InlineSmartBrief } from './smart-brief/InlineSmartBrief';
 
+// --- Types (Matched to your new Schema) ---
 interface ArticleProps {
   article: {
     id: string;
@@ -18,177 +26,187 @@ interface ArticleProps {
     summary: string;
     imageUrl?: string | null;
     source: string;
-    publishedAt: string | Date;
-    trustScore: number;
-    biasScore: number;
-    politicalLean: string;
-    url: string;
-    isSaved?: boolean;
-    readingTime?: number;
-    category?: string;
+    publishedAt: Date | string;
+    politicalLean?: string;
+    biasScore?: number;
+    trustScore?: number;
+    category: string;
+    audioUrl?: string;
   };
-  className?: string;
+  layout?: 'grid' | 'list' | 'compact';
 }
 
-export function ArticleCard({ article, className }: ArticleProps) {
-  const { user } = useAuth();
-  const { playTrack, isPlaying, currentTrack, pauseTrack } = useAudio();
-  
-  // Local state
-  const [isSaved, setIsSaved] = useState(article.isSaved || false);
-  const [showBrief, setShowBrief] = useState(false); // Toggle for Smart Brief
+// --- Helper: Political Color Logic ---
+const getLeanColor = (lean?: string) => {
+  if (!lean) return 'bg-gray-400';
+  if (lean.includes('Left')) return 'bg-blue-500';
+  if (lean.includes('Right')) return 'bg-red-500';
+  return 'bg-purple-500'; // Center
+};
 
-  const utils = trpc.useContext();
+const getTrustColor = (score?: number) => {
+  if (!score) return 'text-gray-500 border-gray-200';
+  if (score >= 80) return 'text-green-600 border-green-200 bg-green-50';
+  if (score >= 50) return 'text-yellow-600 border-yellow-200 bg-yellow-50';
+  return 'text-red-600 border-red-200 bg-red-50';
+};
+
+export const ArticleCard: React.FC<ArticleProps> = ({ article, layout = 'grid' }) => {
+  const { isPlaying, currentTrack, playTrack, pauseTrack } = useAudio();
+  const { user, openLoginModal } = useAuth();
+  const [isSaved, setIsSaved] = useState(false); // Optimistic UI state
+
+  // tRPC Mutations
   const toggleSaveMutation = trpc.article.toggleSave.useMutation({
-    onSuccess: (data) => {
-      setIsSaved(data.saved);
-      toast.success(data.saved ? "Article saved" : "Removed from saved");
-      utils.article.getSavedArticles.invalidate();
-    },
-    onError: () => {
-      toast.error("Failed to update save status");
-      setIsSaved(!isSaved); // Revert
-    }
+    onSuccess: () => setIsSaved((prev) => !prev),
   });
 
-  // Audio Logic
+  // Derived State
   const isCurrentTrack = currentTrack?.id === article.id;
-  const isActive = isCurrentTrack && isPlaying;
+  const isPlayingThis = isCurrentTrack && isPlaying;
+  const formattedDate = formatDistanceToNow(new Date(article.publishedAt), { addSuffix: true });
 
   const handlePlay = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (isActive) {
+    if (isPlayingThis) {
       pauseTrack();
     } else {
-      playTrack({
-        id: article.id,
-        title: article.headline,
-        author: article.source,
-        url: "", // The service will handle fetching the real URL
-        imageUrl: article.imageUrl || undefined
-      });
+      playTrack(article);
     }
   };
 
   const handleSave = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!user) {
-        toast.error("Please sign in to save articles");
-        return;
+      openLoginModal();
+      return;
     }
-    setIsSaved(!isSaved); 
     toggleSaveMutation.mutate({ articleId: article.id });
-  };
-
-  // Determine Trust Color (Original Logic)
-  const getTrustColor = (score: number) => {
-    if (score >= 85) return "text-emerald-600 border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20";
-    if (score >= 60) return "text-yellow-600 border-yellow-200 bg-yellow-50 dark:bg-yellow-900/20";
-    return "text-red-600 border-red-200 bg-red-50 dark:bg-red-900/20";
+    setIsSaved(!isSaved); // Optimistic update
   };
 
   return (
-    <div className={cn(
-      "group bg-card rounded-xl border border-border shadow-sm transition-all duration-300 hover:shadow-md overflow-hidden",
-      className
-    )}>
-      {/* 1. Main Click Area */}
-      <div onClick={() => setShowBrief(!showBrief)} className="cursor-pointer">
-        <div className="flex flex-col sm:flex-row">
+    <Card 
+      className={cn(
+        "group relative overflow-hidden transition-all hover:shadow-md border-border/50 bg-card",
+        layout === 'list' ? "flex flex-row gap-4" : "flex flex-col"
+      )}
+    >
+      {/* --- 1. BIAS STRIP INDICATOR --- */}
+      <div 
+        className={cn(
+          "absolute left-0 top-0 bottom-0 w-1", 
+          getLeanColor(article.politicalLean)
+        )} 
+        title={`Political Lean: ${article.politicalLean || 'Neutral'}`}
+      />
+
+      {/* --- 2. IMAGE SECTION --- */}
+      {layout !== 'compact' && article.imageUrl && (
+        <div className={cn(
+          "relative overflow-hidden bg-muted",
+          layout === 'list' ? "w-1/3 min-w-[120px] max-w-[200px]" : "aspect-video w-full"
+        )}>
+          <img 
+            src={article.imageUrl} 
+            alt={article.headline}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+          />
           
-          {/* Image */}
-          <div className="sm:w-1/3 aspect-video sm:aspect-auto relative overflow-hidden bg-muted">
-             {article.imageUrl ? (
-               <img 
-                 src={article.imageUrl} 
-                 alt={article.headline}
-                 className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                 loading="lazy"
-               />
-             ) : (
-               <div className="w-full h-full flex items-center justify-center text-muted-foreground/30">
-                 <span className="text-4xl font-serif">Ag</span>
-               </div>
-             )}
-             
-             {/* Audio Floating Button */}
-             <div className="absolute top-2 right-2 z-10">
-                <Button
-                   size="icon"
-                   variant="secondary"
-                   className={cn(
-                       "h-8 w-8 rounded-full bg-background/80 backdrop-blur hover:bg-primary hover:text-primary-foreground shadow-sm transition-all",
-                       isActive && "bg-primary text-primary-foreground scale-110"
-                   )}
-                   onClick={handlePlay}
-                >
-                   {isActive ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3 ml-0.5" />}
-                </Button>
-             </div>
-          </div>
-
-          {/* Content */}
-          <div className="flex-1 p-4 flex flex-col">
-             
-             {/* Metadata */}
-             <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
-                 <span className="font-semibold text-foreground">{article.source}</span>
-                 <div className={cn("px-2 py-0.5 rounded-full text-[10px] font-medium border flex items-center gap-1", getTrustColor(article.trustScore))}>
-                    <div className="w-1.5 h-1.5 rounded-full bg-current" />
-                    {article.trustScore}% Trust
-                 </div>
-             </div>
-
-             {/* Headline */}
-             <h3 className="font-bold text-lg leading-snug group-hover:text-primary transition-colors mb-2">
-                {article.headline}
-             </h3>
-
-             {/* Summary */}
-             <p className="text-sm text-muted-foreground line-clamp-2">
-                {article.summary}
-             </p>
-
-             {/* Footer */}
-             <div className="mt-4 flex items-center justify-between pt-3 border-t border-border/40">
-                <div className="flex gap-2">
-                   <Badge variant="outline" className="text-[10px] font-normal h-5">{article.politicalLean}</Badge>
-                   {article.readingTime && (
-                       <span className="text-[10px] text-muted-foreground py-0.5">{article.readingTime} min</span>
-                   )}
-                </div>
-
-                <div className="flex items-center gap-1">
-                   {/* Smart Brief Button */}
-                   <Button 
-                     variant="ghost" 
-                     size="sm" 
-                     className={cn("h-7 px-2 text-xs gap-1.5", showBrief && "text-primary bg-primary/5")}
-                     onClick={(e) => { e.stopPropagation(); setShowBrief(!showBrief); }}
-                   >
-                      <Sparkles className="w-3 h-3" />
-                      {showBrief ? "Close" : "Brief"}
-                   </Button>
-                   
-                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleSave}>
-                      <Bookmark className={cn("h-4 w-4", isSaved && "fill-primary text-primary")} />
-                   </Button>
-                   
-                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={(e) => { e.stopPropagation(); window.open(article.url, '_blank'); }}>
-                      <ExternalLink className="h-4 w-4" />
-                   </Button>
-                </div>
-             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 2. Expanded Smart Brief Section */}
-      {showBrief && (
-        <div className="px-4 pb-4 bg-card border-t border-border/40">
-           <InlineSmartBrief articleId={article.id} />
+          {/* Audio Overlay Button */}
+          <button
+            onClick={handlePlay}
+            className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 transition-opacity group-hover:opacity-100"
+          >
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background/90 shadow-lg backdrop-blur-sm">
+              {isPlayingThis ? (
+                <Pause className="h-6 w-6 text-foreground" />
+              ) : (
+                <Play className="h-6 w-6 text-foreground ml-1" />
+              )}
+            </div>
+          </button>
+          
+          {/* Category Badge (Over Image) */}
+          <Badge 
+            variant="secondary" 
+            className="absolute left-3 top-3 bg-background/80 backdrop-blur-md text-xs font-medium"
+          >
+            {article.category}
+          </Badge>
         </div>
       )}
-    </div>
+
+      {/* --- 3. CONTENT SECTION --- */}
+      <div className="flex flex-1 flex-col justify-between p-4 pl-5">
+        <CardHeader className="p-0 space-y-2">
+          {/* Meta Row */}
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-foreground">{article.source}</span>
+              <span>•</span>
+              <span>{formattedDate}</span>
+            </div>
+            
+            {/* Trust Score Badge */}
+            {article.trustScore && (
+              <div className={cn(
+                "flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-medium",
+                getTrustColor(article.trustScore)
+              )}>
+                {article.trustScore > 70 ? <ShieldCheck className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+                {article.trustScore}% Trust
+              </div>
+            )}
+          </div>
+
+          {/* Headline */}
+          <h3 className={cn(
+            "font-serif font-bold leading-tight text-foreground group-hover:text-primary transition-colors",
+            layout === 'compact' ? "text-sm" : "text-lg"
+          )}>
+            {article.headline}
+          </h3>
+          
+          {/* Summary (Truncated) */}
+          {layout !== 'compact' && (
+            <p className="line-clamp-2 text-sm text-muted-foreground">
+              {article.summary}
+            </p>
+          )}
+        </CardHeader>
+
+        {/* --- 4. ACTION FOOTER --- */}
+        <CardFooter className="p-0 pt-4 mt-auto flex items-center justify-between">
+          <div className="flex gap-2">
+            {/* Smart Briefing Trigger */}
+            <Button variant="ghost" size="sm" className="h-8 text-xs px-2 gap-1 text-blue-600 hover:text-blue-700 hover:bg-blue-50">
+               ✨ AI Brief
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleSave}>
+              {isSaved ? (
+                <BookmarkCheck className="h-4 w-4 text-primary fill-current" />
+              ) : (
+                <Bookmark className="h-4 w-4 text-muted-foreground" />
+              )}
+            </Button>
+            
+            <Button variant="ghost" size="icon" className="h-8 w-8">
+              <Share2 className="h-4 w-4 text-muted-foreground" />
+            </Button>
+            
+            <Button variant="ghost" size="icon" className="h-8 w-8">
+              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </div>
+        </CardFooter>
+      </div>
+    </Card>
   );
-}
+};
+
+export default ArticleCard;
