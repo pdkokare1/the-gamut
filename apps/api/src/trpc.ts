@@ -46,32 +46,37 @@ const activityMiddleware = t.middleware(async ({ ctx, path, next, rawInput }) =>
     try {
       // Map procedure names to ActionTypes
       let action: 'view_analysis' | 'view_comparison' | 'share_article' | null = null;
-      let articleId: string | undefined = undefined;
+      let articleId: string | null = null; // Default to null for Prisma compliance
 
-      // Extract article ID from input if present
-      // @ts-ignore
+      // Extract article ID from input if present and valid
       if (rawInput && typeof rawInput === 'object' && 'id' in rawInput) {
-           // @ts-ignore
-           articleId = rawInput.id;
+           // @ts-ignore - We safely checked for 'id' above
+           const extractedId = rawInput.id;
+           if (typeof extractedId === 'string' && extractedId.length === 24) {
+             articleId = extractedId;
+           }
       }
 
+      // Map paths to business logic actions
       if (path === 'article.getById') action = 'view_analysis';
       if (path === 'narrative.getClusterById') action = 'view_comparison';
-      // Add more mappings as needed
+      // Add more mappings as needed here
 
       if (action) {
         // Fire and forget (don't await) to keep response fast
+        // FIX: articleId is now optional in schema, so we can safely pass null
         ctx.prisma.activityLog.create({
           data: {
             userId: ctx.user.uid,
             action,
-            articleId,
+            articleId: articleId, // Can be null now
             timestamp: new Date()
           }
         }).catch(err => console.error("Failed to log activity:", err));
       }
     } catch (e) {
-      // Ignore logging errors
+      // Ignore logging errors to prevent blocking the main request
+      console.error("Activity logging error:", e);
     }
   }
 
