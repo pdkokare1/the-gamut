@@ -268,31 +268,57 @@ class ArticleService {
         }
       }
 
-      // C. Ultimate Fallback: Standard MongoDB Text Search (Regex/Basic)
-      // This replicates the old articleModel.ts 'Option B' behavior
+      // C. Ultimate Fallback: Standard MongoDB Text Search (Weighted)
+      // REPLACED: Regex fallback with true $text Search to match ArticleModel.ts logic
       if (!articles.length) {
          try {
-             const rawStandardResults = await prisma.article.findMany({
+             // We use aggregateRaw here to access the $text operator and textScore
+             // which are not directly available in Prisma's findMany
+             const rawStandardResults = await prisma.article.aggregateRaw({
+                 pipeline: [
+                     { 
+                         $match: { 
+                             $text: { $search: safeQuery } 
+                         } 
+                     },
+                     {
+                         $sort: { score: { $meta: "textScore" }, publishedAt: -1 }
+                     },
+                     { $limit: limit },
+                     {
+                         $project: {
+                             "_id": 1, "id": { "$toString": "$_id" },
+                             "headline": 1, "summary": 1, "source": 1, "category": 1,
+                             "politicalLean": 1, "url": 1, "imageUrl": 1, "publishedAt": 1,
+                             "score": { "$meta": "textScore" }
+                         }
+                     }
+                 ]
+             });
+             
+             articles = rawStandardResults as any[];
+             if (articles.length > 0) searchMethod = 'Standard Weighted';
+         } catch (err) {
+             logger.error(`Standard Text Search Failed: ${err}`);
+             
+             // Last resort: Regex (if text index is missing)
+             const rawRegexResults = await prisma.article.findMany({
                  where: {
                      OR: [
                          { headline: { contains: safeQuery, mode: 'insensitive' } },
-                         { summary: { contains: safeQuery, mode: 'insensitive' } },
-                         { clusterTopic: { contains: safeQuery, mode: 'insensitive' } }
+                         { summary: { contains: safeQuery, mode: 'insensitive' } }
                      ]
                  },
                  take: limit,
                  orderBy: { publishedAt: 'desc' }
              });
              
-             // Convert Prisma Objects to match Raw shape
-             articles = rawStandardResults.map(a => ({
+             articles = rawRegexResults.map(a => ({
                  ...a,
-                 id: a.id, // Prisma already handles _id -> id
-                 publishedAt: a.publishedAt.toISOString() // Normalize date for mapping below
+                 id: a.id,
+                 publishedAt: a.publishedAt.toISOString()
              }));
-             searchMethod = 'Standard';
-         } catch (err) {
-             logger.error(`All Search Methods Failed: ${err}`);
+             searchMethod = 'Regex Fallback';
          }
       }
 
@@ -690,10 +716,44 @@ class ArticleService {
     return { message, savedArticles: updatedProfile?.savedArticleIds || [] };
   }
 
-  // --- 9. Smart Briefing (Placeholder for AI Summary) ---
+  // --- 9. Smart Briefing (Instant DB Return) ---
+  // FIXED: Matches articleController.ts behavior (Instant return, no expensive AI call unless needed)
   async getSmartBriefing(articleId: string) {
-    // This connects to your aiService
-    return aiService.generateBriefing(articleId);
+    const article = await prisma.article.findUnique({
+      where: { id: articleId },
+      select: {
+        headline: true,
+        summary: true,
+        keyFindings: true,
+        recommendations: true,
+        trustScore: true,
+        politicalLean: true,
+        source: true
+      }
+    });
+
+    if (!article) throw new Error('Article not found');
+
+    // Use stored findings if available (Instant)
+    const keyPoints = (article.keyFindings && article.keyFindings.length > 0)
+      ? article.keyFindings
+      : ["Analysis in progress. Key findings will appear shortly."];
+
+    const recommendations = (article.recommendations && article.recommendations.length > 0)
+      ? article.recommendations
+      : ["Follow this topic for updates.", "Compare sources to verify details."];
+
+    return {
+      title: article.headline,
+      content: article.summary,
+      keyPoints: keyPoints,
+      recommendations: recommendations,
+      meta: {
+        trustScore: article.trustScore,
+        politicalLean: article.politicalLean,
+        source: article.source
+      }
+    };
   }
 
   // --- 10. Admin Ops ---
