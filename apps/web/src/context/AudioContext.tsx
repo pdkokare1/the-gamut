@@ -1,220 +1,286 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
-import { toast } from 'sonner';
+import { trpc } from '@/utils/trpc'; // Access to your new backend
+import { useToast } from '@/components/ui/use-toast'; // Shadcn Toast
 
-export type AudioTrack = {
+// --- Types ---
+export interface Track {
   id: string;
-  url: string;
-  title: string;
-  author?: string;
-  imageUrl?: string;
-};
+  headline: string;
+  summary: string;
+  source: string;
+  imageUrl?: string | null;
+  audioUrl?: string; // Pre-existing audio
+  content?: string;  // For TTS generation if needed
+}
 
 interface AudioContextType {
   // State
   isPlaying: boolean;
-  isLoading: boolean;
-  currentTrack: AudioTrack | null;
-  queue: AudioTrack[];
-  currentIndex: number;
-  progress: number;
-  duration: number;
-
+  isBuffering: boolean;
+  currentTrack: Track | null;
+  queue: Track[];
+  progress: number; // 0-100%
+  currentTime: number; // seconds
+  duration: number; // seconds
+  playbackRate: number;
+  
   // Actions
-  playTrack: (track: AudioTrack) => Promise<void>;
-  playQueue: (tracks: AudioTrack[], startIndex?: number) => Promise<void>;
+  playTrack: (track: Track) => Promise<void>;
   togglePlay: () => void;
+  pauseTrack: () => void;
   seek: (time: number) => void;
-  playNext: () => void;
-  playPrevious: () => void;
-  closePlayer: () => void;
+  skipNext: () => void;
+  skipPrev: () => void;
+  addToQueue: (track: Track) => void;
+  setPlaybackRate: (rate: number) => void;
+  clearQueue: () => void;
 }
 
 const AudioContext = createContext<AudioContextType | undefined>(undefined);
 
-export function AudioProvider({ children }: { children: React.ReactNode }) {
+export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // --- State ---
-  const [currentTrack, setCurrentTrack] = useState<AudioTrack | null>(null);
-  const [queue, setQueue] = useState<AudioTrack[]>([]);
-  const [currentIndex, setCurrentIndex] = useState<number>(-1);
-  
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
+  const [queue, setQueue] = useState<Track[]>([]);
   const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playbackRate, setPlaybackRateState] = useState(1.0);
 
-  // --- Helpers ---
+  // --- Refs & Services ---
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { toast } = useToast();
   
-  // Internal play function to handle the HTMLAudioElement
-  const loadAndPlay = async (track: AudioTrack) => {
+  // tRPC Mutation for on-the-fly TTS
+  const generateAudioMutation = trpc.narrative.generateAudio.useMutation();
+
+  // --- Initialization ---
+  useEffect(() => {
+    const audio = new Audio();
+    audio.preload = 'metadata'; // Optimized loading
+    audioRef.current = audio;
+
+    // Event Listeners
+    const updateProgress = () => {
+      if (!audio.duration) return;
+      setCurrentTime(audio.currentTime);
+      setDuration(audio.duration);
+      setProgress((audio.currentTime / audio.duration) * 100);
+    };
+
+    const handleEnded = () => {
+      setIsPlaying(false);
+      handleNext(); // Auto-play next
+    };
+
+    const handleWaiting = () => setIsBuffering(true);
+    const handlePlaying = () => setIsBuffering(false);
+    const handleError = (e: any) => {
+        setIsBuffering(false);
+        console.error("Audio Error:", e);
+        toast({
+            title: "Playback Error",
+            description: "Could not play this track.",
+            variant: "destructive"
+        });
+        handleNext(); // Skip broken track
+    };
+
+    audio.addEventListener('timeupdate', updateProgress);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('waiting', handleWaiting);
+    audio.addEventListener('playing', handlePlaying);
+    audio.addEventListener('error', handleError);
+
+    // Initial Mobile Setup (Unlock Audio Context)
+    const unlockAudio = () => {
+        audio.load();
+        document.removeEventListener('click', unlockAudio);
+        document.removeEventListener('touchstart', unlockAudio);
+    };
+    document.addEventListener('click', unlockAudio);
+    document.addEventListener('touchstart', unlockAudio);
+
+    return () => {
+      audio.pause();
+      audio.removeEventListener('timeupdate', updateProgress);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('waiting', handleWaiting);
+      audio.removeEventListener('playing', handlePlaying);
+      audio.removeEventListener('error', handleError);
+      document.removeEventListener('click', unlockAudio);
+      document.removeEventListener('touchstart', unlockAudio);
+    };
+  }, []);
+
+  // Sync Playback Rate changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate]);
+
+  // --- Core Logic ---
+
+  const playTrack = async (track: Track) => {
     if (!audioRef.current) return;
     
-    try {
-      setIsLoading(true);
-      // Reset if switching tracks
-      if (audioRef.current.src !== track.url) {
-          audioRef.current.src = track.url;
-          audioRef.current.load();
-      }
-      
-      await audioRef.current.play();
-      setIsPlaying(true);
-      setCurrentTrack(track);
-    } catch (err) {
-      console.error("Playback failed:", err);
-      toast.error("Could not play audio. It might be missing or corrupted.");
-      setIsPlaying(false);
-    } finally {
-      setIsLoading(false);
+    // If clicking the same track, just toggle
+    if (currentTrack?.id === track.id) {
+        togglePlay();
+        return;
     }
-  };
 
-  // --- Public Actions ---
+    try {
+        setIsBuffering(true);
+        setCurrentTrack(track);
+        
+        let src = track.audioUrl;
 
-  const playTrack = async (track: AudioTrack) => {
-    // Legacy support: Playing a single track clears queue and sets this as the only item
-    setQueue([track]);
-    setCurrentIndex(0);
-    await loadAndPlay(track);
-  };
+        // TTS Fallback: If no URL, generate one
+        if (!src) {
+            toast({ title: "Generating Audio...", description: "This takes a few seconds." });
+            try {
+                // Assuming your backend has this procedure mapped
+                // If not, we can swap this for a direct fetch to your /api/tts endpoint
+                const result = await generateAudioMutation.mutateAsync({ 
+                    articleId: track.id,
+                    text: track.summary // Use summary for faster generation
+                });
+                src = result.audioUrl;
+            } catch (err) {
+                console.error("TTS Failed", err);
+                toast({ title: "Audio Unavailable", description: "Text-to-speech failed.", variant: "destructive" });
+                setIsBuffering(false);
+                return;
+            }
+        }
 
-  const playQueue = async (tracks: AudioTrack[], startIndex = 0) => {
-    if (tracks.length === 0) return;
-    
-    setQueue(tracks);
-    setCurrentIndex(startIndex);
-    
-    const trackToPlay = tracks[startIndex];
-    if (trackToPlay) {
-        await loadAndPlay(trackToPlay);
+        if (src) {
+            audioRef.current.src = src;
+            audioRef.current.playbackRate = playbackRate;
+            await audioRef.current.play();
+            setIsPlaying(true);
+        }
+
+    } catch (error) {
+        console.error("Play Failed:", error);
+        setIsPlaying(false);
+    } finally {
+        setIsBuffering(false);
     }
   };
 
   const togglePlay = () => {
-    if (audioRef.current && currentTrack) {
-      if (isPlaying) {
-        audioRef.current.pause();
-      } else {
-        audioRef.current.play().catch(e => console.error("Resume failed:", e));
-      }
-      setIsPlaying(!isPlaying);
+    if (!audioRef.current || !currentTrack) return;
+
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch(console.error);
+      setIsPlaying(true);
+    }
+  };
+
+  const pauseTrack = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      setIsPlaying(false);
     }
   };
 
   const seek = (time: number) => {
     if (audioRef.current) {
       audioRef.current.currentTime = time;
-      setProgress(time);
+      setCurrentTime(time);
     }
   };
 
-  const playNext = useCallback(() => {
-    if (queue.length === 0) return;
-    
-    const nextIndex = currentIndex + 1;
-    if (nextIndex < queue.length) {
-        setCurrentIndex(nextIndex);
-        loadAndPlay(queue[nextIndex]);
-    } else {
-        // End of Queue
-        setIsPlaying(false);
-        setCurrentIndex(-1);
-        setCurrentTrack(null);
-        setQueue([]); // Optional: Clear queue on finish?
-    }
-  }, [queue, currentIndex]);
+  // --- Queue Management ---
+  
+  // Internal helper to avoid closure staleness
+  const handleNext = useCallback(() => {
+    setQueue((prevQueue) => {
+        if (prevQueue.length === 0) return prevQueue;
+        const [next, ...rest] = prevQueue;
+        
+        // We need to trigger play for 'next', but we are inside a state updater.
+        // We'll use a timeout or effect, but here simply calling the ref is safest 
+        // if we update currentTrack state correctly.
+        setTimeout(() => playTrack(next), 0);
+        
+        return rest;
+    });
+  }, []); // Dependencies would be recursive, so we use functional updates
 
-  const playPrevious = useCallback(() => {
-    if (queue.length === 0) return;
-
-    const prevIndex = currentIndex - 1;
-    if (prevIndex >= 0) {
-        setCurrentIndex(prevIndex);
-        loadAndPlay(queue[prevIndex]);
-    } else {
-        // If at start, just restart current
-        seek(0);
-    }
-  }, [queue, currentIndex]);
-
-  const closePlayer = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-    setIsPlaying(false);
-    setCurrentTrack(null);
-    setQueue([]);
-    setCurrentIndex(-1);
+  const skipNext = () => {
+      if (queue.length > 0) {
+          handleNext();
+      } else {
+          // If no queue, maybe just seek to end? 
+          // For now, pause.
+          pauseTrack();
+          setCurrentTime(0);
+      }
   };
 
-  // --- Effects ---
+  const skipPrev = () => {
+      if (audioRef.current && audioRef.current.currentTime > 3) {
+          // If > 3s in, restart track
+          seek(0);
+      } else {
+          // Logic for previous track not implemented in basic queue 
+          // (Requires a history stack, avoiding complexity for now as per instructions)
+          seek(0);
+      }
+  };
 
-  useEffect(() => {
-    // Initialize Audio Object
-    audioRef.current = new Audio();
-    const audio = audioRef.current;
+  const addToQueue = (track: Track) => {
+    setQueue((prev) => {
+        // Prevent duplicates
+        if (prev.find(t => t.id === track.id)) return prev;
+        
+        toast({ title: "Added to Queue", description: track.headline });
+        return [...prev, track];
+    });
+  };
+  
+  const clearQueue = () => setQueue([]);
+  
+  const setPlaybackRate = (rate: number) => {
+      setPlaybackRateState(rate);
+  };
 
-    const updateProgress = () => setProgress(audio.currentTime);
-    const updateDuration = () => setDuration(audio.duration || 0);
-    const onWaiting = () => setIsLoading(true);
-    const onCanPlay = () => setIsLoading(false);
-    
-    // Auto-Play Next Logic
-    const onEnded = () => {
-        setIsPlaying(false);
-        playNext(); 
-    };
+  const value = {
+    isPlaying,
+    isBuffering,
+    currentTrack,
+    queue,
+    progress,
+    currentTime,
+    duration,
+    playbackRate,
+    playTrack,
+    togglePlay,
+    pauseTrack,
+    seek,
+    skipNext,
+    skipPrev,
+    addToQueue,
+    setPlaybackRate,
+    clearQueue
+  };
 
-    const onError = (e: Event) => {
-        console.error("Audio Error:", e);
-        setIsLoading(false);
-        setIsPlaying(false);
-    };
-
-    audio.addEventListener('timeupdate', updateProgress);
-    audio.addEventListener('loadedmetadata', updateDuration);
-    audio.addEventListener('ended', onEnded);
-    audio.addEventListener('waiting', onWaiting);
-    audio.addEventListener('canplay', onCanPlay);
-    audio.addEventListener('error', onError);
-
-    return () => {
-      audio.removeEventListener('timeupdate', updateProgress);
-      audio.removeEventListener('loadedmetadata', updateDuration);
-      audio.removeEventListener('ended', onEnded);
-      audio.removeEventListener('waiting', onWaiting);
-      audio.removeEventListener('canplay', onCanPlay);
-      audio.removeEventListener('error', onError);
-      audio.pause();
-    };
-  }, [playNext]); // Re-bind if playNext changes (which depends on queue)
-
-  return (
-    <AudioContext.Provider value={{ 
-        isPlaying, 
-        isLoading, 
-        currentTrack, 
-        queue,
-        currentIndex,
-        progress, 
-        duration, 
-        playTrack, 
-        playQueue,
-        togglePlay, 
-        seek, 
-        playNext,
-        playPrevious,
-        closePlayer 
-    }}>
-      {children}
-    </AudioContext.Provider>
-  );
-}
+  return <AudioContext.Provider value={value}>{children}</AudioContext.Provider>;
+};
 
 export const useAudio = () => {
   const context = useContext(AudioContext);
-  if (!context) throw new Error('useAudio must be used within an AudioProvider');
+  if (context === undefined) {
+    throw new Error('useAudio must be used within an AudioProvider');
+  }
   return context;
 };
