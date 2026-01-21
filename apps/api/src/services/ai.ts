@@ -28,7 +28,7 @@ export interface IGeminiResponse {
   }[];
 }
 
-// --- VALIDATION SCHEMAS (Zod - Type Safe) ---
+// --- VALIDATION SCHEMAS (Zod) ---
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
@@ -95,7 +95,8 @@ const FullAnalysisSchema = z.object({
 });
 
 // --- CONSTANTS ---
-const EMBEDDING_MODEL = "text-embedding-004";
+// Using 2.5 series from shared constants
+const EMBEDDING_MODEL = CONSTANTS.AI_MODELS.EMBEDDING;
 const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
@@ -110,7 +111,7 @@ class AIService {
     } else {
         logger.warn("⚠️ No Gemini API Key found in config");
     }
-    logger.info(`🤖 AI Service Initialized`);
+    logger.info(`🤖 AI Service Initialized (Model: ${CONSTANTS.AI_MODELS.FAST})`);
   }
 
   // --- HELPER: Clean Text ---
@@ -140,7 +141,7 @@ class AIService {
           clean = clean.replace(new RegExp(phrase, 'gi'), '');
       });
 
-      const SAFE_LIMIT = isProMode ? 1500000 : 800000;
+      const SAFE_LIMIT = isProMode ? CONSTANTS.AI_LIMITS.MAX_TOKENS_PRO : CONSTANTS.AI_LIMITS.MAX_TOKENS_FLASH;
       if (clean.length > SAFE_LIMIT) {
           return clean.substring(0, SAFE_LIMIT) + "\n\n[...Truncated...]";
       }
@@ -150,11 +151,16 @@ class AIService {
   /**
    * --- 1. SINGLE ARTICLE ANALYSIS ---
    */
-  async analyzeArticle(article: Partial<IArticle>, targetModel: string = "gemini-1.5-flash", mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
+  async analyzeArticle(article: Partial<IArticle>, targetModel: string = CONSTANTS.AI_MODELS.FLASH, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
     if (!isSystemHealthy) return this.getFallbackAnalysis(article);
 
-    const isPro = targetModel.includes('pro');
+    // If targetModel is generic, resolve to specific 2.5 version
+    const resolvedModel = targetModel === 'quality' ? CONSTANTS.AI_MODELS.QUALITY : 
+                          targetModel === 'fast' ? CONSTANTS.AI_MODELS.FAST : 
+                          targetModel;
+
+    const isPro = resolvedModel.includes('pro');
     const optimizedArticle = {
         ...article,
         summary: this.optimizeTextForTokenLimits(article.summary || article.content || "", isPro),
@@ -167,7 +173,7 @@ class AIService {
         const prompt = await promptManager.getAnalysisPrompt(optimizedArticle, mode);
         
         const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`;
             const response = await axios.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS, 
@@ -176,7 +182,7 @@ class AIService {
                   temperature: 0.1, 
                   maxOutputTokens: 8192 
                 }
-            }, { timeout: 60000 });
+            }, { timeout: CONSTANTS.TIMEOUTS.AI_GENERATION });
             return response.data;
         });
 
@@ -197,7 +203,7 @@ class AIService {
       if (!articles || articles.length < 2) return null;
 
       try {
-          const targetModel = "gemini-1.5-pro"; // Force Pro for synthesis
+          const targetModel = CONSTANTS.AI_MODELS.QUALITY; // Use 2.5 Pro for synthesis
           let docContext = articles.map((art, i) => 
             `\n--- SOURCE ${i + 1}: ${art.source} ---\nHEADLINE: ${art.headline}\nTEXT: ${this.cleanText(art.summary)}\n`
           ).join('');
@@ -214,7 +220,7 @@ class AIService {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS,
                 generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
-              }, { timeout: 120000 }); 
+              }, { timeout: CONSTANTS.TIMEOUTS.NARRATIVE_GEN }); 
               return response.data;
           });
           
@@ -227,7 +233,7 @@ class AIService {
   }
 
   /**
-   * --- 3. BATCH EMBEDDINGS ---
+   * --- 3. BATCH EMBEDDINGS (Restored & Optimized) ---
    */
   async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
@@ -239,6 +245,7 @@ class AIService {
         const allEmbeddings: number[][] = new Array(texts.length).fill([]);
         const chunks = [];
 
+        // Prepare chunks preserving index
         for (let i = 0; i < texts.length; i += BATCH_SIZE) {
              chunks.push(texts.slice(i, i + BATCH_SIZE).map((text, idx) => ({
                  text: this.cleanText(text).substring(0, 3000), 
@@ -246,7 +253,7 @@ class AIService {
              })));
         }
 
-        // Sequential processing
+        // Sequential processing to respect rate limits
         for (const chunk of chunks) {
             const requests = chunk.map(item => ({
                 model: `models/${EMBEDDING_MODEL}`,
@@ -260,20 +267,22 @@ class AIService {
                     
                     if (response.data.embeddings) {
                         response.data.embeddings.forEach((emb, localIdx) => {
+                            // Map back to original index
                             allEmbeddings[chunk[localIdx].index] = emb.values;
                         });
                     }
                     return response.data;
                 });
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limit pause
+                // Small pause to be nice to the API
+                await new Promise(resolve => setTimeout(resolve, 500)); 
 
             } catch (err: any) {
-                logger.warn(`Partial Batch Failure: ${err.message}`);
+                logger.warn(`Partial Batch Embedding Failure: ${err.message}`);
             }
         }
 
         await CircuitBreaker.recordSuccess('GEMINI');
-        return allEmbeddings.filter(e => e.length > 0);
+        return allEmbeddings.filter(e => e && e.length > 0);
 
     } catch (error: any) {
         logger.error(`Batch Embedding Error: ${error.message}`);
@@ -282,8 +291,7 @@ class AIService {
   }
 
   /**
-   * --- 4. SINGLE EMBEDDING (RESTORED) ---
-   * Crucial for Search Features in article-service.ts
+   * --- 4. SINGLE EMBEDDING ---
    */
   async createEmbedding(text: string): Promise<number[] | null> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
