@@ -1,4 +1,3 @@
-// apps/api/src/services/news-service.ts
 import https from 'https';
 import crypto from 'crypto';
 import { z } from 'zod';
@@ -7,11 +6,11 @@ import { logger } from '../utils/logger';
 import { redis } from '../utils/redis'; 
 import apiClient from '../utils/apiClient';
 import config from '../config';
-import { CONSTANTS, FETCH_CYCLES, JUNK_KEYWORDS } from '../utils/constants'; // Imported constants
+import { CONSTANTS, FETCH_CYCLES, JUNK_KEYWORDS } from '../utils/constants';
 import { articleProcessor } from './article-processor';
 import pipelineService from './pipeline-service';
-import aiService from './ai'; // Import AI service for batch embeddings
-import clusteringService from './clustering'; // Import for feed optimization
+import aiService from './ai'; 
+import clusteringService from './clustering'; 
 
 // --- Types ---
 export interface NewsArticle {
@@ -22,7 +21,7 @@ export interface NewsArticle {
     image?: string;
     publishedAt: string;
     content?: string;
-    embedding?: number[]; // Added to support batch embedding flow
+    embedding?: number[]; 
 }
 
 const GNewsResponseSchema = z.object({
@@ -43,7 +42,7 @@ class NewsService {
         const queryParams = { 
             lang: 'en', 
             sortby: 'publishedAt', 
-            max: CONSTANTS.NEWS.FETCH_LIMIT, // Use constant
+            max: CONSTANTS.NEWS.FETCH_LIMIT, 
             ...params, 
             apikey: apiKey 
         };
@@ -104,14 +103,15 @@ class NewsService {
         return `${CONSTANTS.REDIS_KEYS.NEWS_SEEN_PREFIX}${hash}`;
     }
 
-    // A. Redis Check
+    // A. Redis Check (Processing Lock)
+    // FIX: Lock for only 3 mins (180s) to allow retries if server crashes
     private async filterSeenOrProcessing(articles: NewsArticle[]): Promise<NewsArticle[]> {
         if (articles.length === 0) return [];
         const checks = articles.map(async (article) => {
             const key = this.getRedisKey(article.url);
             try {
-                // Lock for 4 hours (NX = Only if not exists)
-                const result = await redis.set(key, 'processing', 'EX', 14400, 'NX');
+                // NX = Only if not exists
+                const result = await redis.set(key, 'processing', 'EX', 180, 'NX');
                 return result === 'OK' ? article : null;
             } catch (e) { return article; }
         });
@@ -119,7 +119,23 @@ class NewsService {
         return results.filter((a): a is NewsArticle => a !== null);
     }
 
-    // B. Database Check
+    // B. Final Commit (Mark as Seen)
+    // FIX: Lock for 4 hours (14400s) ONLY after successful processing
+    private async markAsSeenInRedis(articles: NewsArticle[]) {
+        if (articles.length === 0) return;
+        try {
+            const pipeline = redis.pipeline();
+            for (const article of articles) {
+                const key = this.getRedisKey(article.url);
+                pipeline.set(key, '1', 'EX', 14400); 
+            }
+            await pipeline.exec();
+        } catch (e: any) {
+            logger.error(`Redis Pipeline Error: ${e.message}`);
+        }
+    }
+
+    // C. Database Check
     private async filterExistingInDB(articles: NewsArticle[]): Promise<NewsArticle[]> {
         if (articles.length === 0) return [];
         const urls = articles.map(a => a.url);
@@ -138,7 +154,7 @@ class NewsService {
         }
     }
 
-    // --- 5. Main Public Method (RESTORED BATCH FLOW) ---
+    // --- 5. Main Public Method ---
     async fetchNews(): Promise<NewsArticle[]> {
         const allArticles: NewsArticle[] = [];
         
@@ -165,7 +181,7 @@ class NewsService {
             logger.info(`🗑️ Filtered ${allArticles.length - qualityArticles.length} junk articles.`);
         }
 
-        // 2. Redis Dedupe (Fast)
+        // 2. Redis Dedupe (Locking)
         const freshArticles = await this.filterSeenOrProcessing(qualityArticles);
         
         // 3. DB Dedupe (Bulk)
@@ -173,8 +189,7 @@ class NewsService {
         
         if (dbUnseenArticles.length === 0) return [];
 
-        // 4. Batch Embedding (Cost Optimization)
-        // Instead of embedding 1-by-1 in the pipeline, we do it here in one shot.
+        // 4. Batch Embedding
         logger.info(`⚡ Generating Batch Embeddings for ${dbUnseenArticles.length} articles...`);
         const textsToEmbed = dbUnseenArticles.map(a => `${a.title} ${a.description}`);
         const embeddings = await aiService.createBatchEmbeddings(textsToEmbed);
@@ -183,38 +198,27 @@ class NewsService {
             dbUnseenArticles.forEach((article, idx) => {
                 article.embedding = embeddings[idx];
             });
-        } else {
-            logger.warn("⚠️ Batch embedding partial fail or mismatch. Pipeline will handle individual embeddings.");
         }
         
         // 5. Processor Cleaning 
         const cleanArticles = articleProcessor.processBatch(dbUnseenArticles);
         
-        // 6. Save via Pipeline (Sequential to ensure logic integrity)
+        // 6. Save via Pipeline (Sequential)
         const savedArticles: NewsArticle[] = [];
-        const touchedClusters = new Set<number>();
 
         for (const article of cleanArticles) {
-             // Pass the article (with embedding!) to the pipeline
              const success = await pipelineService.processSingleArticle(article);
              if (success) {
                  savedArticles.push(article);
-                 // We need to know the cluster ID to optimize it later.
-                 // Since pipeline returns boolean, we might have to query or infer it.
-                 // For now, we rely on the next scheduled optimization or we assume global optimization.
              }
         }
         
-        // 7. Cluster Feed Optimization (Restore Logic)
-        // Since we don't get IDs back easily from processSingleArticle without changing its signature,
-        // We will trigger a global optimization for the most active clusters or recent ones.
-        // Or better: We assume the clustering service internally triggered an optimization check 
-        // if we updated `clustering.ts` correctly (it has a fire-and-forget logic).
-        
-        // Explicitly calling optimization for safety if we can identify clusters
-        // (This part assumes pipeline saves clusterId. If not, this is a best-effort call)
+        // 7. Commit to Redis (Prevent re-fetch)
+        await this.markAsSeenInRedis(savedArticles);
+
+        // 8. Cluster Feed Optimization
         if (savedArticles.length > 0) {
-            // Find recent clusters to optimize
+            // Retrieve cluster IDs for newly saved articles to optimize their feeds
             const recentClusters = await prisma.article.findMany({
                 where: { url: { in: savedArticles.map(a => a.url) } },
                 select: { clusterId: true }
