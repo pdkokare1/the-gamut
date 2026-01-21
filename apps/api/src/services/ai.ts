@@ -1,9 +1,7 @@
-// apps/api/src/services/ai.ts
-
-import axios from 'axios';
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import KeyManager from '../utils/KeyManager';
+import apiClient from '../utils/apiClient'; // Switched from axios to apiClient
 import CircuitBreaker from '../utils/CircuitBreaker';
 import logger from '../utils/logger';
 import config from '../config'; 
@@ -95,7 +93,6 @@ const FullAnalysisSchema = z.object({
 });
 
 // --- CONSTANTS ---
-// Using 2.5 series from shared constants
 const EMBEDDING_MODEL = CONSTANTS.AI_MODELS.EMBEDDING;
 const NEWS_SAFETY_SETTINGS = [
     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
@@ -151,11 +148,10 @@ class AIService {
   /**
    * --- 1. SINGLE ARTICLE ANALYSIS ---
    */
-  async analyzeArticle(article: Partial<IArticle>, targetModel: string = CONSTANTS.AI_MODELS.FLASH, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
+  async analyzeArticle(article: Partial<IArticle>, targetModel: string = CONSTANTS.AI_MODELS.FAST, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
     if (!isSystemHealthy) return this.getFallbackAnalysis(article);
 
-    // If targetModel is generic, resolve to specific 2.5 version
     const resolvedModel = targetModel === 'quality' ? CONSTANTS.AI_MODELS.QUALITY : 
                           targetModel === 'fast' ? CONSTANTS.AI_MODELS.FAST : 
                           targetModel;
@@ -172,9 +168,10 @@ class AIService {
     try {
         const prompt = await promptManager.getAnalysisPrompt(optimizedArticle, mode);
         
+        // Uses apiClient for global timeout/header management
         const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`;
-            const response = await axios.post<IGeminiResponse>(url, {
+            const response = await apiClient.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS, 
                 generationConfig: {
@@ -203,7 +200,7 @@ class AIService {
       if (!articles || articles.length < 2) return null;
 
       try {
-          const targetModel = CONSTANTS.AI_MODELS.QUALITY; // Use 2.5 Pro for synthesis
+          const targetModel = CONSTANTS.AI_MODELS.QUALITY; 
           let docContext = articles.map((art, i) => 
             `\n--- SOURCE ${i + 1}: ${art.source} ---\nHEADLINE: ${art.headline}\nTEXT: ${this.cleanText(art.summary)}\n`
           ).join('');
@@ -216,7 +213,7 @@ class AIService {
 
           const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
               const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-              const response = await axios.post<IGeminiResponse>(url, {
+              const response = await apiClient.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS,
                 generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
@@ -233,7 +230,7 @@ class AIService {
   }
 
   /**
-   * --- 3. BATCH EMBEDDINGS (Restored & Optimized) ---
+   * --- 3. BATCH EMBEDDINGS ---
    */
   async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
@@ -245,7 +242,6 @@ class AIService {
         const allEmbeddings: number[][] = new Array(texts.length).fill([]);
         const chunks = [];
 
-        // Prepare chunks preserving index
         for (let i = 0; i < texts.length; i += BATCH_SIZE) {
              chunks.push(texts.slice(i, i + BATCH_SIZE).map((text, idx) => ({
                  text: this.cleanText(text).substring(0, 3000), 
@@ -253,7 +249,6 @@ class AIService {
              })));
         }
 
-        // Sequential processing to respect rate limits
         for (const chunk of chunks) {
             const requests = chunk.map(item => ({
                 model: `models/${EMBEDDING_MODEL}`,
@@ -263,17 +258,15 @@ class AIService {
             try {
                 await KeyManager.executeWithRetry('GEMINI', async (apiKey) => {
                     const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${apiKey}`;
-                    const response = await axios.post<{ embeddings?: { values: number[] }[] }>(url, { requests }, { timeout: 45000 });
+                    const response = await apiClient.post<{ embeddings?: { values: number[] }[] }>(url, { requests }, { timeout: 45000 });
                     
                     if (response.data.embeddings) {
                         response.data.embeddings.forEach((emb, localIdx) => {
-                            // Map back to original index
                             allEmbeddings[chunk[localIdx].index] = emb.values;
                         });
                     }
                     return response.data;
                 });
-                // Small pause to be nice to the API
                 await new Promise(resolve => setTimeout(resolve, 500)); 
 
             } catch (err: any) {
@@ -302,7 +295,7 @@ class AIService {
 
         const responseData = await KeyManager.executeWithRetry<{ embedding: { values: number[] } }>('GEMINI', async (apiKey) => {
              const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`;
-             const res = await axios.post(url, {
+             const res = await apiClient.post(url, {
                 model: `models/${EMBEDDING_MODEL}`,
                 content: { parts: [{ text: clean }] }
              }, { timeout: 10000 });
