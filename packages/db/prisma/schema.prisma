@@ -35,7 +35,6 @@ model Article {
   biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
-
   credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
@@ -46,7 +45,7 @@ model Article {
   
   trustScore           Float    @default(0)
   trustLevel           String?
-
+  
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
@@ -63,7 +62,6 @@ model Article {
   isLatest       Boolean @default(true)
   
   // -- Vector Data --
-  // We exclude this in API calls to save bandwidth
   embedding      Float[]
   
   keyFindings     String[]
@@ -73,15 +71,19 @@ model Article {
   updatedAt       DateTime @updatedAt
 
   // -- Relations --
-  savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id])
+  // FIX: Prisma does not allow defining the relation on both sides for MongoDB lists.
+  // We keep the data field `savedByProfileIds` so no data is lost, but we remove
+  // the @relation attribute here to prevent "Ambiguous Relation" errors.
+  // The relation is actively managed on the Profile model.
   savedByProfileIds String[]      @db.ObjectId
+  // savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id]) 
 
   activityLogs      ActivityLog[]
 
   // -- Indexes --
   // NOTE: MongoDB Atlas Search indexes (for smartSearch) and TTL indexes (expireAfterSeconds)
-  // must be managed directly in MongoDB/Atlas, as Prisma does not yet support them.
-
+  // must be managed directly in MongoDB/Atlas.
+  
   // 1. Standard Field Indexes
   @@index([source])
   @@index([trustScore])
@@ -92,20 +94,11 @@ model Article {
   @@index([isLatest])
   @@index([publishedAt(sort: Desc)]) 
 
-  // 2. Compound Indexes (Performance Boosters)
-  // A. "For You" Feed: Filter by Category + Lean + Date + Latest Only
+  // 2. Compound Indexes
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) 
-  
-  // B. "Trusted News" Feed: Filter by Lean + High Trust + Date
   @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])    
-     
-  // C. "Cluster View": Quickly find all articles in a specific event
   @@index([clusterId, publishedAt(sort: Desc)])            
-  
-  // D. "Regional News"
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       
-  
-  // General Sort Helpers
   @@index([isLatest, publishedAt(sort: Desc)])
   
   @@map("articles")
@@ -128,7 +121,6 @@ model Narrative {
 
   category         String?
   country          String?
-
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -143,7 +135,6 @@ model Profile {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique 
   
-  // Sparse indexes for Auth (Optional Unique)
   email                 String?  @unique
   phoneNumber           String?  @unique
   username              String   @unique
@@ -159,6 +150,7 @@ model Profile {
   badges                Badge[]
   
   // -- Saved Content --
+  // This is the Active side of the relation
   savedArticles         Article[] @relation(fields: [savedArticleIds], references: [id])
   savedArticleIds       String[]  @db.ObjectId
   
@@ -175,7 +167,6 @@ model Profile {
   // Relations
   activityLogs          ActivityLog[]
   userStats             UserStats?
-
   @@map("profiles")
 }
 
@@ -187,10 +178,8 @@ model UserStats {
   averageAttentionSpan  Int      @default(0) 
   
   leanExposure          LeanExposure?
-
-  // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
+  // Flexible Map for dynamic topic interests
   topicInterest         Json?
-
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
@@ -205,13 +194,14 @@ model ActivityLog {
   user      Profile  @relation(fields: [userId], references: [userId])
   userId    String   
   
-  article   Article  @relation(fields: [articleId], references: [id])
-  articleId String   @db.ObjectId
+  // FIX: Made article optional because actions like 'view_comparison' 
+  // do not have an associated articleId.
+  article   Article? @relation(fields: [articleId], references: [id])
+  articleId String?  @db.ObjectId
   
   action    ActionType @default(view_analysis)
   timestamp DateTime   @default(now())
 
-  // Compound Indexes for Stats
   @@index([userId, timestamp(sort: Desc)])
   @@index([userId, action, timestamp(sort: Desc)])
   
@@ -230,7 +220,6 @@ model Prompt {
   version     Int        @default(1)
   active      Boolean    @default(true)
   description String?
-
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -266,6 +255,7 @@ model EmergencyContact {
 model Cache {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
+  
   data        Json
   expiresAt   DateTime 
   createdAt   DateTime @default(now())
@@ -274,7 +264,7 @@ model Cache {
 }
 
 // ==========================================
-// 4. TYPES & ENUMS (STRICT PARITY)
+// 4. TYPES & ENUMS
 // ==========================================
 
 type BiasComponents {
