@@ -1,5 +1,3 @@
-// packages/db/prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -37,7 +35,7 @@ model Article {
   biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
-  
+
   credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
@@ -81,6 +79,9 @@ model Article {
   activityLogs      ActivityLog[]
 
   // -- Indexes --
+  // NOTE: MongoDB Atlas Search indexes (for smartSearch) and TTL indexes (expireAfterSeconds)
+  // must be managed directly in MongoDB/Atlas, as Prisma does not yet support them.
+
   // 1. Standard Field Indexes
   @@index([source])
   @@index([trustScore])
@@ -94,10 +95,13 @@ model Article {
   // 2. Compound Indexes (Performance Boosters)
   // A. "For You" Feed: Filter by Category + Lean + Date + Latest Only
   @@index([category, politicalLean, isLatest, publishedAt(sort: Desc)]) 
+  
   // B. "Trusted News" Feed: Filter by Lean + High Trust + Date
-  @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])        
+  @@index([politicalLean, trustScore(sort: Desc), publishedAt(sort: Desc)])    
+     
   // C. "Cluster View": Quickly find all articles in a specific event
   @@index([clusterId, publishedAt(sort: Desc)])            
+  
   // D. "Regional News"
   @@index([country, category, isLatest, publishedAt(sort: Desc)])       
   
@@ -124,7 +128,7 @@ model Narrative {
 
   category         String?
   country          String?
-  
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -183,6 +187,7 @@ model UserStats {
   averageAttentionSpan  Int      @default(0) 
   
   leanExposure          LeanExposure?
+
   // Flexible Map for dynamic topic interests (e.g. { "Technology": 50, "Politics": 20 })
   topicInterest         Json?
 
@@ -261,7 +266,6 @@ model EmergencyContact {
 model Cache {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
-  
   data        Json
   expiresAt   DateTime 
   createdAt   DateTime @default(now())
@@ -270,7 +274,7 @@ model Cache {
 }
 
 // ==========================================
-// 4. TYPES & ENUMS
+// 4. TYPES & ENUMS (STRICT PARITY)
 // ==========================================
 
 type BiasComponents {
