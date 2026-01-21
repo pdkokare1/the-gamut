@@ -1,64 +1,52 @@
-// apps/web/src/context/AuthContext.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { 
   User, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
+  signInWithPopup, 
   signOut, 
-  onAuthStateChanged,
-  signInWithPopup,
-  sendPasswordResetEmail
+  onAuthStateChanged 
 } from 'firebase/auth';
 import { auth, googleProvider } from '@/lib/firebase';
 import { trpc } from '@/utils/trpc';
+import { useToast } from '@/components/ui/use-toast';
+import { LoginModal } from '@/components/modals/LoginModal';
 
-// Define the shape of the Context
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  isGuest: boolean; // RESTORED: Helper for UI locking
-  login: (email: string, pass: string) => Promise<void>;
-  signup: (email: string, pass: string) => Promise<void>;
+  isAdmin: boolean;
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
-  resetPassword: (email: string) => Promise<void>;
-  token: string | null;
+  openLoginModal: () => void;
+  closeLoginModal: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [token, setToken] = useState<string | null>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const { toast } = useToast();
 
-  // tRPC Utils to invalidate queries on login
-  const utils = trpc.useContext();
-
-  // Mutation to sync user to DB on login
-  const syncUser = trpc.profile.syncUser.useMutation({
-      onSuccess: () => {
-          // Refresh profile data once synced
-          utils.profile.get.invalidate(); 
-      }
-  });
+  // tRPC Mutation to sync Firebase User -> Postgres DB
+  const syncProfile = trpc.profile.sync.useMutation();
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       
       if (currentUser) {
-        const t = await currentUser.getIdToken();
-        setToken(t);
-        
-        // Auto-sync user to backend DB (Idempotent)
-        syncUser.mutate({
-            email: currentUser.email || '',
-            username: currentUser.displayName || currentUser.email?.split('@')[0] || 'User',
-            photoUrl: currentUser.photoURL || undefined
-        });
-      } else {
-        setToken(null);
+        try {
+          // Sync user to backend immediately upon auth state confirmation
+          // This ensures the Postgres DB has a record for foreign key relations
+          await syncProfile.mutateAsync({
+             email: currentUser.email || '',
+             displayName: currentUser.displayName || 'Anonymous',
+             photoURL: currentUser.photoURL || ''
+          });
+        } catch (error) {
+          console.error("Profile Sync Failed", error);
+        }
       }
       
       setLoading(false);
@@ -67,46 +55,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, []);
 
-  const login = async (email: string, pass: string) => {
-    await signInWithEmailAndPassword(auth, email, pass);
-  };
-
-  const signup = async (email: string, pass: string) => {
-    await createUserWithEmailAndPassword(auth, email, pass);
-  };
-
   const loginWithGoogle = async () => {
-    await signInWithPopup(auth, googleProvider);
+    try {
+      await signInWithPopup(auth, googleProvider);
+      toast({
+        title: "Welcome Back",
+        description: "Successfully logged in.",
+      });
+      setIsLoginModalOpen(false);
+    } catch (error: any) {
+      console.error("Login Error:", error);
+      toast({
+        title: "Login Failed",
+        description: error.message,
+        variant: "destructive"
+      });
+    }
   };
 
   const logout = async () => {
-    await signOut(auth);
-    utils.invalidate(); // Clear all tRPC cache on logout
+    try {
+      await signOut(auth);
+      toast({
+        title: "Logged Out",
+        description: "See you next time!",
+      });
+    } catch (error) {
+      console.error("Logout Error:", error);
+    }
   };
 
-  const resetPassword = async (email: string) => {
-    await sendPasswordResetEmail(auth, email);
-  };
+  // Simple Admin Check (Expand this logic based on your needs)
+  const isAdmin = user?.email === 'admin@thegamut.com' || false;
+
+  const openLoginModal = () => setIsLoginModalOpen(true);
+  const closeLoginModal = () => setIsLoginModalOpen(false);
 
   return (
     <AuthContext.Provider value={{ 
-        user, 
-        loading, 
-        token, 
-        isGuest: !user, // Derived state for easy use
-        login, 
-        signup, 
-        loginWithGoogle, 
-        logout, 
-        resetPassword 
+      user, 
+      loading, 
+      isAdmin, 
+      loginWithGoogle, 
+      logout,
+      openLoginModal,
+      closeLoginModal
     }}>
       {children}
+      
+      {/* Global Login Modal is rendered here to avoid prop drilling */}
+      <LoginModal 
+        isOpen={isLoginModalOpen} 
+        onClose={closeLoginModal} 
+        onLogin={loginWithGoogle} 
+      />
     </AuthContext.Provider>
   );
-}
+};
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
   return context;
 };
