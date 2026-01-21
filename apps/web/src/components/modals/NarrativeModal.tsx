@@ -1,61 +1,121 @@
 import React from 'react';
-import { X } from 'lucide-react';
-import { trpc } from '../../utils/trpc';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { trpc } from '@/utils/trpc';
+import { formatDistanceToNow } from 'date-fns';
+import { Loader2, Share2, BookOpen } from 'lucide-react';
 
 interface NarrativeModalProps {
   narrativeId: string;
   onClose: () => void;
 }
 
-export function NarrativeModal({ narrativeId, onClose }: NarrativeModalProps) {
-  // Fetch specific narrative details (You might need to add getById to your router if missing)
-  // For now, we assume we might query the feed or a specific endpoint
-  const { data, isLoading } = trpc.article.getInFocusFeed.useQuery(); 
-  
-  // Find the specific narrative from the cached feed or fetch individual if endpoint exists
-  const narrative = data?.find(n => n.id === narrativeId);
-
-  if (!narrative) return null;
+export const NarrativeModal: React.FC<NarrativeModalProps> = ({ narrativeId, onClose }) => {
+  // Fetch narrative details via tRPC
+  const { data: narrative, isLoading } = trpc.narrative.getById.useQuery({ id: narrativeId });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm p-0 sm:p-4 animate-in slide-in-from-bottom-10">
-      <div className="w-full h-[90vh] sm:h-auto sm:max-w-2xl bg-white dark:bg-zinc-900 rounded-t-2xl sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+    <Dialog open={!!narrativeId} onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-[600px] h-[80vh] flex flex-col p-0 gap-0">
         
-        {/* Header Image */}
-        <div className="relative h-64 shrink-0">
-          <img 
-            src={narrative.imageUrl || ''} 
-            className="w-full h-full object-cover"
-            alt={narrative.headline}
-          />
-          <button 
-            onClick={onClose}
-            className="absolute top-4 right-4 bg-black/50 text-white p-2 rounded-full hover:bg-black/70"
-          >
-            <X size={20} />
-          </button>
-          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-6">
-            <h2 className="text-2xl font-bold text-white leading-tight">{narrative.headline}</h2>
+        {/* HEADER */}
+        <DialogHeader className="p-6 pb-4 border-b">
+          <div className="flex items-center gap-2 mb-2">
+            <Badge variant="outline" className="text-purple-600 border-purple-200 bg-purple-50">
+              Developing Story
+            </Badge>
+            {narrative && (
+              <span className="text-xs text-muted-foreground">
+                Updated {formatDistanceToNow(new Date(narrative.lastUpdated), { addSuffix: true })}
+              </span>
+            )}
           </div>
+          <DialogTitle className="text-xl font-serif font-bold leading-tight">
+            {narrative?.masterHeadline || "Loading Narrative..."}
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* SCROLLABLE CONTENT */}
+        <ScrollArea className="flex-1 p-6 pt-4">
+          {isLoading ? (
+            <div className="flex flex-col items-center justify-center h-40 gap-4">
+              <Loader2 className="w-8 h-8 animate-spin text-purple-600" />
+              <p className="text-sm text-muted-foreground">Synthesizing {narrativeId}...</p>
+            </div>
+          ) : narrative ? (
+            <div className="space-y-6">
+              
+              {/* Executive Summary */}
+              <div className="space-y-2">
+                <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                  <BookOpen className="w-4 h-4" /> Executive Summary
+                </h4>
+                <p className="text-sm leading-relaxed text-foreground/90">
+                  {narrative.executiveSummary}
+                </p>
+              </div>
+
+              <Separator />
+
+              {/* Key Consensus Points */}
+              <div className="space-y-3">
+                <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                  Consensus Points
+                </h4>
+                <ul className="space-y-2">
+                  {narrative.consensusPoints?.map((point: string, i: number) => (
+                    <li key={i} className="flex gap-2 text-sm">
+                      <span className="text-purple-600 font-bold">•</span>
+                      <span>{point}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* Source Breakdown (Divergence) */}
+              {narrative.divergencePoints?.length > 0 && (
+                <>
+                  <Separator />
+                  <div className="space-y-3">
+                    <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      Diverging Perspectives
+                    </h4>
+                    {narrative.divergencePoints.map((div: any, i: number) => (
+                      <div key={i} className="bg-muted/30 p-3 rounded-lg border text-sm space-y-2">
+                        <p className="font-medium text-foreground">{div.point}</p>
+                        <div className="flex flex-wrap gap-2">
+                          {div.perspectives.map((p: any, j: number) => (
+                            <Badge key={j} variant="secondary" className="text-xs">
+                              {p.source}: {p.stance}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+            </div>
+          ) : (
+            <div className="text-center py-10 text-muted-foreground">
+              Narrative not found.
+            </div>
+          )}
+        </ScrollArea>
+
+        {/* FOOTER ACTIONS */}
+        <div className="p-4 border-t bg-muted/10 flex justify-between items-center">
+            <Button variant="ghost" size="sm" className="gap-2">
+                <Share2 className="w-4 h-4" /> Share
+            </Button>
+            <Button onClick={onClose}>Close</Button>
         </div>
 
-        {/* Content Scroll */}
-        <div className="p-6 overflow-y-auto max-h-[60vh]">
-          <div className="prose dark:prose-invert max-w-none">
-            <h3 className="text-purple-600 font-semibold mb-2">Key Findings</h3>
-            <ul className="list-disc pl-5 space-y-2 mb-6">
-              {narrative.keyFindings?.map((finding: string, i: number) => (
-                <li key={i}>{finding}</li>
-              ))}
-            </ul>
-
-            <h3 className="text-blue-600 font-semibold mb-2">Full Summary</h3>
-            <p className="whitespace-pre-wrap text-gray-700 dark:text-gray-300">
-              {narrative.summary}
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
-}
+};
