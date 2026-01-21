@@ -1,7 +1,6 @@
-// apps/api/src/services/article-processor.ts
 import { TRUSTED_SOURCES, JUNK_KEYWORDS } from '../utils/constants';
 
-// Define Interface locally to avoid circular deps if types/index.ts isn't ready
+// Define Interface locally to ensure portability
 export interface INewsSourceArticle {
     source: { id?: string; name: string };
     author?: string;
@@ -9,7 +8,7 @@ export interface INewsSourceArticle {
     description?: string;
     url: string;
     urlToImage?: string;
-    image?: string; // Normalized field
+    image?: string; 
     publishedAt: string;
     content?: string;
     category?: string;
@@ -31,7 +30,7 @@ class ArticleProcessor {
     // --- HELPER: Format Headline ---
     private formatHeadline(title: string): string {
         if (!title) return "No Title";
-        // Remove common suffixes like " - CNN", " | Fox News"
+        // Remove common suffixes like " - CNN", " | Fox News" to clean up feed
         return title.split(' - ')[0].split(' | ')[0].trim();
     }
 
@@ -136,14 +135,15 @@ class ArticleProcessor {
     private isValid(article: INewsSourceArticle): boolean {
         if (!article.title || !article.url) return false;
         
-        // Filter out very short content
-        if (article.title.length < 15) return false; 
+        // Strict Validation (Matched to Old Repo)
+        if (article.title.length < 20) return false; 
         if (article.title === "No Title") return false;
         if (!article.description || article.description.length < 30) return false; 
         
         // Word Count Check (Garbage In -> Garbage Out Prevention)
+        // If article is too short, AI Summary will fail.
         const totalWords = (article.title + " " + article.description).split(/\s+/).length;
-        if (totalWords < 30) return false;
+        if (totalWords < 40) return false; // Restored to 40 words constraint
 
         return true;
     }
@@ -156,7 +156,8 @@ class ArticleProcessor {
             if (Math.abs(currentLen - existing.length) > 20) continue;
             
             const score = this.getSimilarityScore(currentTitle, existing);
-            if (score > 0.75) { // 75% similarity threshold
+            // Restored strict threshold
+            if (score > 0.8) { 
                 return true; 
             }
         }
