@@ -1,193 +1,139 @@
-// apps/web/src/components/NewsFeed.tsx
-import React, { useState, useEffect, TouchEvent } from 'react';
-import { trpc } from '../utils/trpc';
-import { useAuth } from '../context/AuthContext';
-import { useInView } from 'react-intersection-observer';
-import { ArticleCard } from './ArticleCard';
-import { LoginModal } from './modals/LoginModal';
-import { NarrativeModal } from './modals/NarrativeModal';
-import { Button } from './ui/button';
-import { cn } from '../lib/utils';
-import { Lock } from 'lucide-react';
-import { toast } from 'sonner';
+import React, { useState, useRef } from 'react';
+import { Helmet } from 'react-helmet-async';
+import { useSwipeable } from 'react-swipeable'; // Suggested addition for cleaner swipe
+import { Lock, Newspaper, Layers, Scale } from 'lucide-react';
 
-type FeedTab = 'latest' | 'infocus' | 'balanced';
+import FeedList from './FeedList';
+import InFocusBar from './InFocusBar';
+import { LoginModal } from '@/components/modals/LoginModal';
+import { useAuth } from '@/context/AuthContext';
+import { useIsMobile } from '@/hooks/use-is-mobile'; // Shadcn hook or custom
+import { useHaptic } from '@/hooks/use-haptic';
+import { cn } from '@/lib/utils';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
-export default function NewsFeed() {
-  const { user, isGuest } = useAuth();
-  const [activeTab, setActiveTab] = useState<FeedTab>('latest');
-  const [showLoginModal, setShowLoginModal] = useState(false);
-  const [selectedNarrativeId, setSelectedNarrativeId] = useState<string | null>(null);
-
-  // --- 1. Swipe Logic (Restored) ---
-  const [touchStart, setTouchStart] = useState<number | null>(null);
-  const [touchEnd, setTouchEnd] = useState<number | null>(null);
-  const minSwipeDistance = 75;
-
-  const onTouchStart = (e: TouchEvent) => {
-    setTouchEnd(null);
-    setTouchStart(e.targetTouches[0].clientX);
-  };
-
-  const onTouchMove = (e: TouchEvent) => setTouchEnd(e.targetTouches[0].clientX);
-
-  const onTouchEnd = () => {
-    if (!touchStart || !touchEnd) return;
-    const distance = touchStart - touchEnd;
-    const isLeftSwipe = distance > minSwipeDistance;
-    const isRightSwipe = distance < -minSwipeDistance;
-
-    if (isLeftSwipe) { // Swiping Left -> Go Right
-      if (activeTab === 'latest') handleTabChange('infocus');
-      else if (activeTab === 'infocus') handleTabChange('balanced');
-    }
-    if (isRightSwipe) { // Swiping Right -> Go Left
-      if (activeTab === 'balanced') handleTabChange('infocus');
-      else if (activeTab === 'infocus') handleTabChange('latest');
-    }
-  };
-
-  // --- 2. Tab Switching with Gatekeeper ---
-  const handleTabChange = (tab: FeedTab) => {
-    if (tab === 'balanced' && isGuest) {
-      toast("Login Required", {
-        description: "Balanced Feed is available for members only.",
-        action: {
-            label: "Login",
-            onClick: () => setShowLoginModal(true)
-        }
-      });
-      return;
-    }
-    setActiveTab(tab);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  // --- 3. Data Fetching ---
-  const latestQuery = trpc.article.getFeed.useInfiniteQuery(
-    { limit: 10 },
-    { getNextPageParam: (lastPage) => lastPage.nextCursor, enabled: activeTab === 'latest' }
-  );
-
-  const balancedQuery = trpc.article.getBalancedFeed.useInfiniteQuery(
-    { limit: 10 },
-    { getNextPageParam: (lastPage) => lastPage.nextCursor, enabled: activeTab === 'balanced' && !isGuest }
-  );
-
-  const narrativeQuery = trpc.article.getInFocusFeed.useQuery(
-    undefined, 
-    { enabled: activeTab === 'infocus' }
-  );
-
-  // --- 4. Infinite Scroll ---
-  const { ref, inView } = useInView();
-  
-  useEffect(() => {
-    if (inView) {
-      if (activeTab === 'latest' && latestQuery.hasNextPage) latestQuery.fetchNextPage();
-      else if (activeTab === 'balanced' && balancedQuery.hasNextPage) balancedQuery.fetchNextPage();
-    }
-  }, [inView, activeTab]);
-
-  // --- Renderer ---
-  const renderContent = () => {
-    const isLoading = 
-      (activeTab === 'latest' && latestQuery.isLoading) ||
-      (activeTab === 'infocus' && narrativeQuery.isLoading) ||
-      (activeTab === 'balanced' && balancedQuery.isLoading);
-
-    if (isLoading) {
-      return <div className="space-y-4 pt-4">{/* Skeletons would go here */}</div>;
-    }
-
-    if (activeTab === 'latest') {
-      return (
-        <div className="space-y-4 pt-4">
-          {latestQuery.data?.pages.map((page, i) => (
-            <React.Fragment key={i}>
-              {page.items.map((item) => (
-                <ArticleCard key={item.id} article={item} />
-              ))}
-            </React.Fragment>
-          ))}
-          <div ref={ref} className="h-10" />
-        </div>
-      );
-    }
-
-    if (activeTab === 'infocus') {
-      return (
-        <div className="space-y-4 pt-4">
-          {narrativeQuery.data?.map((narrative) => (
-             <div key={narrative.id} onClick={() => setSelectedNarrativeId(narrative.id)} className="cursor-pointer">
-                <ArticleCard 
-                  article={{...narrative, source: 'Narrative', url: ''}} 
-                  className="border-primary/50"
-                />
-             </div>
-          ))}
-        </div>
-      );
-    }
-
-    if (activeTab === 'balanced') {
-      return (
-         <div className="space-y-4 pt-4">
-          {balancedQuery.data?.pages.map((page, i) => (
-            <React.Fragment key={i}>
-              {page.items.map((item) => (
-                <ArticleCard key={item.id} article={item} />
-              ))}
-            </React.Fragment>
-          ))}
-           <div ref={ref} className="h-10" />
-        </div>
-      );
-    }
-  };
-
-  return (
-    <div 
-      className="min-h-screen pb-20"
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
-    >
-      {/* Sticky Tabs */}
-      <div className="sticky top-16 z-30 bg-background/80 backdrop-blur-md border-b border-border">
-        <div className="flex justify-around p-2 max-w-lg mx-auto">
-          {[
-            { id: 'latest', label: 'Latest' },
-            { id: 'infocus', label: 'Narratives' },
-            { id: 'balanced', label: 'Balanced' }
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => handleTabChange(tab.id as FeedTab)}
-              className={cn(
-                "flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-full transition-all duration-200",
-                activeTab === tab.id 
-                  ? "bg-primary text-primary-foreground shadow-sm" 
-                  : "text-muted-foreground hover:bg-muted"
-              )}
-            >
-              {tab.label}
-              {tab.id === 'balanced' && isGuest && <Lock className="w-3 h-3 opacity-70" />}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Main Content */}
-      <div className="px-4 max-w-2xl mx-auto">
-        {renderContent()}
-      </div>
-
-      {/* Modals */}
-      <LoginModal isOpen={showLoginModal} onClose={() => setShowLoginModal(false)} />
-      {selectedNarrativeId && (
-        <NarrativeModal narrativeId={selectedNarrativeId} onClose={() => setSelectedNarrativeId(null)} />
-      )}
-    </div>
-  );
+// Types
+export interface IFilters {
+    category?: string;
+    politicalLean?: string;
 }
+
+interface NewsFeedProps {
+    filters: IFilters;
+    onFilterChange: (f: IFilters) => void;
+}
+
+type FeedMode = 'latest' | 'infocus' | 'balanced';
+
+const NewsFeed: React.FC<NewsFeedProps> = ({ filters, onFilterChange }) => {
+    const [mode, setMode] = useState<FeedMode>('latest');
+    const [showLoginModal, setShowLoginModal] = useState(false);
+    
+    // Hooks
+    const { user } = useAuth();
+    const isMobile = useIsMobile();
+    const { vibrate } = useHaptic(); // Assuming useHaptic returns object or function
+
+    // --- MODE SWITCHING ---
+    const handleModeChange = (newMode: string) => {
+        vibrate();
+        
+        // Guest Protection for Balanced Mode
+        if (!user && newMode === 'balanced') {
+            setShowLoginModal(true);
+            return;
+        }
+        
+        setMode(newMode as FeedMode);
+    };
+
+    // --- SWIPE HANDLERS ---
+    const swipeHandlers = useSwipeable({
+        onSwipedLeft: () => {
+            if (mode === 'latest') handleModeChange('infocus');
+            else if (mode === 'infocus') handleModeChange('balanced');
+        },
+        onSwipedRight: () => {
+            if (mode === 'balanced') handleModeChange('infocus');
+            else if (mode === 'infocus') handleModeChange('latest');
+        },
+        trackMouse: false
+    });
+
+    const getPageTitle = () => {
+        switch(mode) {
+            case 'balanced': return 'Balanced Perspectives | The Gamut';
+            case 'infocus': return 'Narratives | The Gamut';
+            default: return 'The Gamut - Full Spectrum News';
+        }
+    };
+
+    return (
+        <main className="min-h-screen bg-background" {...swipeHandlers}>
+            <Helmet><title>{getPageTitle()}</title></Helmet>
+
+            {/* --- 1. TABS NAVIGATION --- */}
+            <div className="sticky top-0 z-50 bg-background/80 backdrop-blur-md border-b">
+                <div className="max-w-3xl mx-auto">
+                    <Tabs value={mode} onValueChange={handleModeChange} className="w-full">
+                        <TabsList className="w-full grid grid-cols-3 h-14 bg-transparent p-0">
+                            
+                            <TabsTrigger 
+                                value="latest" 
+                                className="data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none h-full gap-2 transition-all"
+                            >
+                                <Newspaper className="w-4 h-4" />
+                                <span className={cn(isMobile ? "text-xs" : "text-sm")}>Latest</span>
+                            </TabsTrigger>
+
+                            <TabsTrigger 
+                                value="infocus" 
+                                className="data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none h-full gap-2 transition-all"
+                            >
+                                <Layers className="w-4 h-4" />
+                                <span className={cn(isMobile ? "text-xs" : "text-sm")}>Narratives</span>
+                            </TabsTrigger>
+
+                            <TabsTrigger 
+                                value="balanced" 
+                                className="data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none h-full gap-2 transition-all relative"
+                            >
+                                <Scale className="w-4 h-4" />
+                                <span className={cn(isMobile ? "text-xs" : "text-sm")}>Balanced</span>
+                                
+                                {/* Lock Icon for Guests */}
+                                {!user && (
+                                    <Lock className="w-3 h-3 text-muted-foreground ml-1 absolute top-2 right-2 sm:static" />
+                                )}
+                            </TabsTrigger>
+
+                        </TabsList>
+                    </Tabs>
+                </div>
+            </div>
+
+            {/* --- 2. SUB-NAVIGATION (In Focus Bar) --- */}
+            <InFocusBar 
+                activeTopic={filters.category} // Using category filter as topic for now
+                onTopicClick={(topic) => onFilterChange({ ...filters, category: topic })} 
+            />
+
+            {/* --- 3. MAIN CONTENT --- */}
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <FeedList 
+                    mode={mode} 
+                    filters={filters}
+                    onOpenNarrative={(n) => console.log("Open Narrative Modal", n)} 
+                />
+            </div>
+
+            {/* --- MODALS --- */}
+            <LoginModal 
+                isOpen={showLoginModal} 
+                onClose={() => setShowLoginModal(false)}
+            />
+        </main>
+    );
+};
+
+export default NewsFeed;
