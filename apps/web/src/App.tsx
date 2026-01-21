@@ -1,67 +1,69 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { AppLayout } from '@/components/layout/AppLayout';
-import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import React, { useState } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { httpBatchLink } from '@trpc/client';
+import { trpc } from './utils/trpc';
+import { AuthProvider } from './context/AuthContext';
+import { AudioProvider } from './context/AudioContext';
+import { Toaster } from './components/ui/toaster'; // Shadcn Toast
+import NewsFeed from './components/NewsFeed';
+import { HelmetProvider } from 'react-helmet-async';
 
-// --- Context Providers ---
-import { AuthProvider } from '@/context/AuthContext';
-import { AudioProvider } from '@/context/AudioContext';
-import { UIProvider } from '@/context/UIContext';
-
-// --- Pages ---
-import { LoginPage } from '@/pages/LoginPage';
-import { HomePage } from '@/pages/HomePage';
-import { SearchPage } from '@/pages/SearchPage';
-import { SavedPage } from '@/pages/SavedPage';         // Migrated
-import { DashboardPage } from '@/pages/DashboardPage'; // Migrated
-import { ProfilePage } from '@/pages/ProfilePage';
-import { EmergencyPage } from '@/pages/EmergencyPage'; // Migrated
-import { SettingsPage } from '@/pages/SettingsPage';   // Migrated
-import { NarrativePage } from '@/pages/NarrativePage'; // Detailed Article View
-import { ExplorePage } from '@/pages/ExplorePage';     // Discovery View
+// Import Global CSS (Tailwind)
+import './index.css';
 
 export default function App() {
-  return (
-    <AuthProvider>
-      <AudioProvider>
-        <UIProvider>
-            <Routes>
-              
-              {/* Public Routes */}
-              <Route path="/login" element={<LoginPage />} />
+  // 1. Initialize Query Client
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 1000 * 60 * 5, // 5 minutes cache
+        retry: 1
+      }
+    }
+  }));
 
-              {/* Protected App Routes 
-                  All routes inside this wrapper get the Header, Player, and Modals automatically.
-              */}
-              <Route element={
-                <ProtectedRoute>
-                  <AppLayout />
-                </ProtectedRoute>
-              }>
-                {/* Core Feeds */}
-                <Route path="/" element={<HomePage />} />
-                <Route path="/explore" element={<ExplorePage />} />
+  // 2. Initialize tRPC Client
+  const [trpcClient] = useState(() =>
+    trpc.createClient({
+      links: [
+        httpBatchLink({
+          url: import.meta.env.VITE_API_URL || 'http://localhost:3001/trpc',
+          // You can add headers here for auth tokens later
+          headers() {
+             return {
+                 // 'Authorization': getAuthToken() 
+             };
+          }
+        }),
+      ],
+    })
+  );
+
+  return (
+    <trpc.Provider client={trpcClient} queryClient={queryClient}>
+      <QueryClientProvider client={queryClient}>
+        <HelmetProvider>
+            <AuthProvider>
+              <AudioProvider>
                 
-                {/* Discovery & Search */}
-                <Route path="/search" element={<SearchPage />} />
+                {/* APP LAYOUT */}
+                <div className="min-h-screen bg-background font-sans text-foreground antialiased selection:bg-purple-100 selection:text-purple-900">
+                  
+                  {/* For now, we render the NewsFeed directly as the Home Page. 
+                      Later we can add <Routes> here for /profile, /settings, etc. 
+                  */}
+                  <NewsFeed filters={{}} onFilterChange={() => {}} />
+
+                  {/* GLOBAL OVERLAYS */}
+                  <Toaster />
+                  {/* <GlobalPlayerBar /> -> We can add this fixed at bottom */}
                 
-                {/* Personalization */}
-                <Route path="/saved" element={<SavedPage />} />
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/profile" element={<ProfilePage />} />
-                
-                {/* Utilities */}
-                <Route path="/emergency" element={<EmergencyPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                
-                {/* Dynamic Content */}
-                <Route path="/narrative/:id" element={<NarrativePage />} />
-                
-                {/* Fallback - Redirect unknown URLs to Home */}
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Route>
-            </Routes>
-        </UIProvider>
-      </AudioProvider>
-    </AuthProvider>
+                </div>
+
+              </AudioProvider>
+            </AuthProvider>
+        </HelmetProvider>
+      </QueryClientProvider>
+    </trpc.Provider>
   );
 }
