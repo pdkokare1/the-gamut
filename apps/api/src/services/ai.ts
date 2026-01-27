@@ -1,7 +1,7 @@
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import KeyManager from '../utils/KeyManager';
-import apiClient from '../utils/apiClient'; // Switched from axios to apiClient
+import apiClient from '../utils/apiClient';
 import CircuitBreaker from '../utils/CircuitBreaker';
 import logger from '../utils/logger';
 import config from '../config'; 
@@ -9,7 +9,7 @@ import AppError from '../utils/AppError';
 import { CONSTANTS } from '../utils/constants';
 import promptManager from '../utils/promptManager';
 
-// --- TYPES & INTERFACES ---
+// --- TYPES ---
 export interface IArticle {
   headline: string;
   summary: string;
@@ -26,7 +26,7 @@ export interface IGeminiResponse {
   }[];
 }
 
-// --- VALIDATION SCHEMAS (Zod) ---
+// --- VALIDATION SCHEMAS (Zod - Preserving Type Safety) ---
 const BasicAnalysisSchema = z.object({
   summary: z.string(),
   category: z.string(),
@@ -133,14 +133,20 @@ class AIService {
 
   private optimizeTextForTokenLimits(text: string, isProMode: boolean = false): string {
       let clean = this.cleanText(text);
-      const junkPhrases = ["Subscribe to continue reading", "Read more", "Sign up", "Advertisement"];
+      
+      // Restored Junk Phrases from Original
+      const junkPhrases = [
+          "Subscribe to continue reading", "Read more", "Sign up for our newsletter",
+          "Follow us on", "© 2023", "© 2024", "© 2025", "All rights reserved",
+          "Click here", "Advertisement", "Supported by", "Terms of Service"
+      ];
       junkPhrases.forEach(phrase => {
           clean = clean.replace(new RegExp(phrase, 'gi'), '');
       });
 
       const SAFE_LIMIT = isProMode ? CONSTANTS.AI_LIMITS.MAX_TOKENS_PRO : CONSTANTS.AI_LIMITS.MAX_TOKENS_FLASH;
       if (clean.length > SAFE_LIMIT) {
-          return clean.substring(0, SAFE_LIMIT) + "\n\n[...Truncated...]";
+          return clean.substring(0, SAFE_LIMIT) + "\n\n[...Truncated due to length...]";
       }
       return clean;
   }
@@ -150,7 +156,10 @@ class AIService {
    */
   async analyzeArticle(article: Partial<IArticle>, targetModel: string = CONSTANTS.AI_MODELS.FAST, mode: 'Full' | 'Basic' = 'Full'): Promise<any> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
-    if (!isSystemHealthy) return this.getFallbackAnalysis(article);
+    if (!isSystemHealthy) {
+        logger.warn('⚡ Circuit Breaker OPEN for Gemini. Using Fallback.');
+        return this.getFallbackAnalysis(article);
+    }
 
     const resolvedModel = targetModel === 'quality' ? CONSTANTS.AI_MODELS.QUALITY : 
                           targetModel === 'fast' ? CONSTANTS.AI_MODELS.FAST : 
@@ -163,12 +172,12 @@ class AIService {
         headline: article.headline ? this.cleanText(article.headline) : ""
     };
     
+    // Safety check for empty content
     if (optimizedArticle.summary.length < 50) return this.getFallbackAnalysis(article);
 
     try {
         const prompt = await promptManager.getAnalysisPrompt(optimizedArticle, mode);
         
-        // Uses apiClient for global timeout/header management
         const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${apiKey}`;
             const response = await apiClient.post<IGeminiResponse>(url, {
@@ -200,15 +209,25 @@ class AIService {
       if (!articles || articles.length < 2) return null;
 
       try {
-          const targetModel = CONSTANTS.AI_MODELS.QUALITY; 
-          let docContext = articles.map((art, i) => 
-            `\n--- SOURCE ${i + 1}: ${art.source} ---\nHEADLINE: ${art.headline}\nTEXT: ${this.cleanText(art.summary)}\n`
-          ).join('');
+          const targetModel = CONSTANTS.AI_MODELS.QUALITY; // Force Quality (Pro)
+          
+          let docContext = "";
+          articles.forEach((art, index) => {
+              docContext += `\n--- SOURCE ${index + 1}: ${art.source} ---\n`;
+              docContext += `HEADLINE: ${art.headline}\n`;
+              docContext += `TEXT: ${this.cleanText(art.summary)}\n`; 
+          });
 
           const prompt = `
-            You are an expert Chief Editor. Synthesize a "Master Narrative" from these ${articles.length} reports.
+            You are an expert Chief Editor and Narrative Analyst.
+            Analyze the following ${articles.length} news reports on the same event.
+            
+            Your goal is to synthesize a "Master Narrative" that highlights the consensus facts but also clearly explains the divergence in reporting.
+            
             OUTPUT JSON: { masterHeadline, executiveSummary, consensusPoints: [], divergencePoints: [{ point, perspectives: [{source, stance}] }] }
-            DOCUMENTS: ${docContext}
+            
+            DOCUMENTS:
+            ${docContext}
           `;
 
           const data = await KeyManager.executeWithRetry<IGeminiResponse>('GEMINI', async (apiKey) => {
@@ -216,7 +235,11 @@ class AIService {
               const response = await apiClient.post<IGeminiResponse>(url, {
                 contents: [{ parts: [{ text: prompt }] }],
                 safetySettings: NEWS_SAFETY_SETTINGS,
-                generationConfig: { responseMimeType: "application/json", temperature: 0.2 }
+                generationConfig: { 
+                    responseMimeType: "application/json", 
+                    temperature: 0.2,
+                    maxOutputTokens: 8192 
+                }
               }, { timeout: CONSTANTS.TIMEOUTS.NARRATIVE_GEN }); 
               return response.data;
           });
@@ -230,7 +253,7 @@ class AIService {
   }
 
   /**
-   * --- 3. BATCH EMBEDDINGS ---
+   * --- 3. BATCH EMBEDDINGS (Restored Robust Logic) ---
    */
   async createBatchEmbeddings(texts: string[]): Promise<number[][] | null> {
     const isSystemHealthy = await CircuitBreaker.isOpen('GEMINI');
@@ -240,8 +263,9 @@ class AIService {
     try {
         const BATCH_SIZE = 100;
         const allEmbeddings: number[][] = new Array(texts.length).fill([]);
+        
+        // Prepare chunks
         const chunks = [];
-
         for (let i = 0; i < texts.length; i += BATCH_SIZE) {
              chunks.push(texts.slice(i, i + BATCH_SIZE).map((text, idx) => ({
                  text: this.cleanText(text).substring(0, 3000), 
@@ -249,6 +273,7 @@ class AIService {
              })));
         }
 
+        // Sequential Processing to avoid Rate Limits (Strict)
         for (const chunk of chunks) {
             const requests = chunk.map(item => ({
                 model: `models/${EMBEDDING_MODEL}`,
@@ -256,6 +281,7 @@ class AIService {
             }));
 
             try {
+                // Execute Batch
                 await KeyManager.executeWithRetry('GEMINI', async (apiKey) => {
                     const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:batchEmbedContents?key=${apiKey}`;
                     const response = await apiClient.post<{ embeddings?: { values: number[] }[] }>(url, { requests }, { timeout: 45000 });
@@ -267,10 +293,13 @@ class AIService {
                     }
                     return response.data;
                 });
-                await new Promise(resolve => setTimeout(resolve, 500)); 
+
+                // Crucial Delay (1s) between batches to respect RPM
+                await new Promise(resolve => setTimeout(resolve, 1000));
 
             } catch (err: any) {
                 logger.warn(`Partial Batch Embedding Failure: ${err.message}`);
+                // Continue to next chunk even if this one failed
             }
         }
 
@@ -310,12 +339,14 @@ class AIService {
     }
   }
 
-  // --- HELPERS ---
+  // --- PRIVATE HELPERS ---
+  
   private parseGeminiResponse(data: IGeminiResponse, mode: 'Full' | 'Basic' | 'Narrative', originalArticle: Partial<IArticle> | null): any {
     try {
         const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!rawText) throw new AppError('AI returned empty content', 502);
 
+        // Robust parsing using jsonrepair
         const cleanJson = jsonrepair(rawText);
         const parsedRaw = JSON.parse(cleanJson);
 
@@ -323,21 +354,32 @@ class AIService {
 
         if (mode === 'Basic') {
             const validated = BasicAnalysisSchema.parse(parsedRaw);
-            return { ...validated, analysisType: 'SentimentOnly', biasScore: 0, trustScore: 0 };
+            return { 
+                ...validated, 
+                politicalLean: 'Not Applicable',
+                analysisType: 'SentimentOnly', 
+                biasScore: 0, 
+                trustScore: 0 
+            };
         } else {
             const validated = FullAnalysisSchema.parse(parsedRaw);
             const trustScore = Math.round(Math.sqrt(validated.credibilityScore * validated.reliabilityScore));
             return { ...validated, analysisType: 'Full', trustScore };
         }
     } catch (error: any) {
-        logger.error(`AI Parse Error: ${error.message}`);
-        if (mode === 'Full' && originalArticle) return this.getFallbackAnalysis(originalArticle);
+        logger.error(`AI Parse/Validation Error: ${error.message}`);
+        
+        // Fallback to Basic if Full fails
+        if (mode === 'Full' && originalArticle) {
+             logger.warn("Attempting Basic Fallback due to parsing error...");
+             return this.getFallbackAnalysis(originalArticle);
+        }
         throw new AppError(`Failed to parse AI response`, 502);
     }
   }
 
   private getFallbackAnalysis(article: Partial<IArticle>): Partial<IArticle> {
-      const rawSummary = article.summary || article.content || "Analysis unavailable";
+      const rawSummary = article.summary || article.content || "Analysis unavailable (System Error)";
       return {
           summary: this.smartTruncate(rawSummary, 60),
           category: "Uncategorized",
