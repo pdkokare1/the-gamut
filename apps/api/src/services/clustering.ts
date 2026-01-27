@@ -4,7 +4,9 @@ import logger from "../utils/logger";
 import aiService from "./ai";
 import { Prisma } from "@prisma/client";
 
-// Helper Interface for Raw MongoDB Results
+// --- INTERFACES: Strict Type Definitions ---
+
+// Represents the raw data coming back from MongoDB `findRaw`
 interface IArticleRaw {
   _id: { $oid: string };
   headline: string;
@@ -14,10 +16,19 @@ interface IArticleRaw {
   category?: string;
   country?: string;
   publishedAt?: { $date: string };
-  score?: number;
+  score?: number; // Vector search score
+}
+
+// Represents the AI service response
+interface INarrativeAIResult {
+  masterHeadline: string;
+  executiveSummary: string;
+  consensusPoints: string[];
+  divergencePoints: { point: string; perspectives: { source: string; stance: string }[] }[];
 }
 
 // --- HELPER: Optimized String Similarity ---
+// No changes needed, logic preserved from original
 function getStringSimilarity(str1: string, str2: string): number {
   const s1 = str1.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   const s2 = str2.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
@@ -58,14 +69,15 @@ function getStringSimilarity(str1: string, str2: string): number {
 
 class ClusteringService {
 
-  // --- Stage 1: Fast Fuzzy Match ---
+  // --- Stage 1: Fast Fuzzy Match (Text Search) ---
   async findSimilarHeadline(headline: string): Promise<any | null> {
     if (!headline || headline.length < 5) return null;
 
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     try {
-      // Prisma doesn't support $text search natively in findMany, so we use findRaw
+      // Prisma `findRaw` requires EJSON format for Dates
+      // This replicates: Article.find({ $text: ..., publishedAt: { $gte: ... } })
       const candidates = await prisma.article.findRaw({
         filter: {
           $text: { $search: headline },
@@ -77,7 +89,7 @@ class ClusteringService {
         }
       }) as unknown as IArticleRaw[];
 
-      let bestMatch: any = null;
+      let bestMatch: IArticleRaw | null = null;
       let bestScore = 0;
 
       for (const candidate of candidates) {
@@ -89,7 +101,7 @@ class ClusteringService {
       }
 
       if (bestScore > 0.80 && bestMatch) {
-        // Normalize _id for Prisma compatibility
+        // Return object with normalized ID for Prisma usage
         return { ...bestMatch, id: bestMatch._id.$oid };
       }
 
@@ -100,14 +112,15 @@ class ClusteringService {
     return null;
   }
 
-  // --- Stage 2: Vector Search ---
+  // --- Stage 2: Vector Search (Semantic Duplicate) ---
   async findSemanticDuplicate(embedding: number[] | undefined, country: string): Promise<any | null> {
     if (!embedding || embedding.length === 0) return null;
 
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     try {
-      const pipeline: any = [
+      // Replicating MongoDB Aggregation Pipeline for Vector Search
+      const pipeline: any[] = [
         {
           "$vectorSearch": {
             "index": "vector_index",
@@ -125,6 +138,7 @@ class ClusteringService {
             "clusterId": 1, "headline": 1, "score": { "$meta": "vectorSearchScore" }
           }
         },
+        // IMPORTANT: Ensure date is passed as EJSON for aggregation match
         { "$match": { "publishedAt": { "$gte": { $date: oneDayAgo.toISOString() } } } }
       ];
 
@@ -132,24 +146,25 @@ class ClusteringService {
         pipeline
       }) as unknown as IArticleRaw[];
 
+      // Threshold check: 0.92 means almost identical meaning
       if (candidates.length > 0 && (candidates[0].score || 0) >= 0.92) {
         return { ...candidates[0], id: candidates[0]._id.$oid };
       }
-    } catch (error) { /* Ignore vector errors */ }
+    } catch (error) { /* Ignore vector errors during lookup */ }
 
     return null;
   }
 
-  // --- Stage 3: Assign Cluster ID ---
+  // --- Stage 3: Assign Cluster ID (Core Logic) ---
   async assignClusterId(newArticleData: any, embedding: number[] | undefined): Promise<number> {
-
+    
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     let finalClusterId = 0;
 
-    // 1. Try Vector Matching
+    // 1. Try Vector Matching (Broader search than strict duplicate)
     if (embedding && embedding.length > 0) {
       try {
-        const pipeline: any = [
+        const pipeline: any[] = [
           {
             "$vectorSearch": {
               "index": "vector_index",
@@ -166,20 +181,21 @@ class ClusteringService {
 
         const candidates = await prisma.article.findRaw({ pipeline }) as unknown as IArticleRaw[];
 
+        // Threshold 0.82: Similar topic, but not necessarily duplicate
         if (candidates.length > 0 && (candidates[0].score || 0) >= 0.82) {
           finalClusterId = candidates[0].clusterId || 0;
         }
       } catch (error) { /* Silent fallback */ }
     }
 
-    // 2. Fallback: Field Match 
+    // 2. Fallback: Exact Field Match (Topic + Category + Country)
     if (finalClusterId === 0 && newArticleData.clusterTopic) {
       const existingCluster = await prisma.article.findFirst({
         where: {
           clusterTopic: newArticleData.clusterTopic,
           category: newArticleData.category,
           country: newArticleData.country,
-          publishedAt: { gte: sevenDaysAgo }
+          publishedAt: { gte: sevenDaysAgo } // Prisma handles Date conversion in standard queries
         },
         orderBy: { publishedAt: 'desc' },
         select: { clusterId: true }
@@ -190,14 +206,18 @@ class ClusteringService {
       }
     }
 
-    // 3. Generate NEW Cluster ID
+    // 3. Generate NEW Cluster ID (Redis Sequence)
     if (finalClusterId === 0) {
       try {
-        if (redis.isReady) {
+        // Safe check for Redis readiness (handles both ioredis function and property styles)
+        const isRedisReady = typeof redis.isReady === 'function' ? redis.isReady() : redis.isReady;
+
+        if (isRedisReady) {
           let newId = await redis.incr('GLOBAL_CLUSTER_ID');
 
+          // Gap Detection/Recovery Logic
+          // If Redis restarts/wipes, we must ensure we don't reuse low IDs.
           if (newId < 100) {
-            // Find max ID in DB to sync Redis
             const maxIdDoc = await prisma.article.findFirst({
               orderBy: { clusterId: 'desc' },
               select: { clusterId: true }
@@ -211,6 +231,7 @@ class ClusteringService {
           }
           finalClusterId = newId;
         } else {
+          // Fallback if Redis is down: use timestamp (pseudo-unique)
           finalClusterId = Math.floor(Date.now() / 1000);
         }
       } catch (err) {
@@ -218,7 +239,8 @@ class ClusteringService {
       }
     }
 
-    // --- NEW: Trigger Narrative Check (Fire and Forget) ---
+    // --- Fire and Forget: Check if Narrative needs update ---
+    // We purposefully do not await this to keep article ingestion fast
     setTimeout(() => {
       this.processClusterForNarrative(finalClusterId).catch(err => {
         logger.warn(`Background Narrative Gen Error for Cluster ${finalClusterId}: ${err.message}`);
@@ -228,16 +250,16 @@ class ClusteringService {
     return finalClusterId;
   }
 
-  // --- Stage 3.5: Feed Optimization (Last One Standing) ---
+  // --- Stage 3.5: Feed Optimization (Prisma Transaction) ---
+  // Ensures only the newest article in a cluster is flagged as 'isLatest: true'
   async optimizeClusterFeed(clusterId: number): Promise<void> {
     if (!clusterId || clusterId === 0) return;
 
     try {
-      // Find all articles in this cluster
       const articles = await prisma.article.findMany({
         where: { clusterId },
         orderBy: { publishedAt: 'desc' },
-        select: { id: true, publishedAt: true }
+        select: { id: true }
       });
 
       if (articles.length <= 1) return;
@@ -245,7 +267,7 @@ class ClusteringService {
       const latestId = articles[0].id;
       const olderIds = articles.slice(1).map(a => a.id);
 
-      // Prisma Transaction to update visibilities
+      // Execute as a single atomic transaction
       await prisma.$transaction([
         prisma.article.update({ where: { id: latestId }, data: { isLatest: true } }),
         prisma.article.updateMany({
@@ -261,37 +283,40 @@ class ClusteringService {
     }
   }
 
-  // --- Stage 4: Narrative Synthesis ---
+  // --- Stage 4: Narrative Synthesis (The "Brain") ---
   async processClusterForNarrative(clusterId: number): Promise<void> {
-    // 1. Check existing narrative
+    // 1. Check if we already have a recent narrative (12 hours cache)
     const existingNarrative = await prisma.narrative.findUnique({
       where: { clusterId }
     });
 
     if (existingNarrative) {
       const hoursOld = (Date.now() - new Date(existingNarrative.lastUpdated).getTime()) / (1000 * 60 * 60);
-      if (hoursOld < 12) return;
+      if (hoursOld < 12) return; // Skip if fresh
     }
 
-    // 2. Fetch Articles
+    // 2. Fetch Top 10 Articles in Cluster
     const articles = await prisma.article.findMany({
       where: { clusterId },
       orderBy: { publishedAt: 'desc' },
       take: 10
     });
 
-    // 3. Threshold checks
+    // 3. Strict Quality Thresholds
+    // Need at least 3 articles from 3 distinct sources to warrant a "Narrative"
     if (articles.length < 3) return;
     const distinctSources = new Set(articles.map(a => a.source));
     if (distinctSources.size < 3) return;
 
-    logger.info(`🧠 Triggering Narrative Synthesis for Cluster ${clusterId}...`);
+    logger.info(`🧠 Triggering Narrative Synthesis for Cluster ${clusterId} (${articles.length} arts, ${distinctSources.size} srcs)...`);
 
-    // 4. Generate Narrative
-    const narrativeData = await aiService.generateNarrative(articles as any);
+    // 4. Generate Content via AI Service
+    // Casting to any allowed here assuming aiService handles the Prism type
+    const narrativeData = await aiService.generateNarrative(articles as any) as INarrativeAIResult;
 
     if (narrativeData) {
-      // 5. Save/Update Narrative (Upsert)
+      // 5. Upsert Narrative (Create or Update)
+      // Uses standard Prisma upsert to avoid race conditions
       await prisma.narrative.upsert({
         where: { clusterId },
         update: {
@@ -299,7 +324,7 @@ class ClusteringService {
           masterHeadline: narrativeData.masterHeadline,
           executiveSummary: narrativeData.executiveSummary,
           consensusPoints: narrativeData.consensusPoints,
-          divergencePoints: narrativeData.divergencePoints,
+          divergencePoints: narrativeData.divergencePoints, // Prisma schema supports JSON/Composite types
           sourceCount: articles.length,
           sources: Array.from(distinctSources),
           category: articles[0].category,
