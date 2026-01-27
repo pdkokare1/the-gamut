@@ -1,6 +1,15 @@
+// apps/api/src/services/article-processor.ts
+import { prisma } from "@repo/db";
+import { redis } from "../utils/redis";
 import { TRUSTED_SOURCES, JUNK_KEYWORDS } from '../utils/constants';
+import { 
+    cleanText, 
+    formatHeadline, 
+    getSimilarityScore, 
+    calculateReadingComplexity 
+} from '../utils/helpers';
 
-// Define Interface locally to ensure portability
+// Extended Interface for Internal Processing
 export interface INewsSourceArticle {
     source: { id?: string; name: string };
     author?: string;
@@ -14,50 +23,66 @@ export interface INewsSourceArticle {
     category?: string;
     country?: string;
     embedding?: number[];
+    
+    // Added for Processor pipeline
+    score?: number;
+    complexityScore?: number;
 }
+
+const DEFAULT_WEIGHTS = {
+    image_bonus: 2,
+    missing_image_penalty: -2,
+    missing_image_untrusted_penalty: -10,
+    trusted_source_bonus: 5,
+    title_length_bonus: 1,
+    junk_keyword_penalty: -20,
+    min_score_cutoff: 0
+};
 
 class ArticleProcessor {
 
-    // --- HELPER: Clean Text ---
-    private cleanText(text: string): string {
-        if (!text) return "";
-        return text
-            .replace(/<[^>]*>/g, '') // Strip HTML
-            .replace(/\s+/g, ' ')    // Normalize whitespace
-            .trim();
-    }
+    /**
+     * Fetch dynamic weights from Redis or DB to allow tuning without redeploying
+     */
+    private async getWeights() {
+        try {
+            // Check Redis First
+            // Safe check for Redis readiness (handles both ioredis function and property styles)
+            const isRedisReady = typeof redis.isReady === 'function' ? redis.isReady() : redis.isReady;
+            
+            if (isRedisReady) {
+                const cached = await redis.get('CONFIG_SCORING_WEIGHTS');
+                if (cached) return JSON.parse(cached);
+            }
 
-    // --- HELPER: Format Headline ---
-    private formatHeadline(title: string): string {
-        if (!title) return "No Title";
-        // Remove common suffixes like " - CNN", " | Fox News" to clean up feed
-        return title.split(' - ')[0].split(' | ')[0].trim();
-    }
-
-    // --- HELPER: Similarity Score (Jaccard Index for Titles) ---
-    private getSimilarityScore(str1: string, str2: string): number {
-        const set1 = new Set(str1.toLowerCase().split(/\s+/));
-        const set2 = new Set(str2.toLowerCase().split(/\s+/));
-        
-        // Intersection
-        let intersection = 0;
-        set1.forEach(word => { if (set2.has(word)) intersection++; });
-        
-        // Union
-        const union = set1.size + set2.size - intersection;
-        return union === 0 ? 0 : intersection / union;
+            // Fallback to DB
+            const conf = await prisma.systemConfig.findUnique({ where: { key: 'scoring_weights' } });
+            
+            // Handle Json value type safely
+            if (conf && conf.value && typeof conf.value === 'object') {
+                if (isRedisReady) {
+                    await redis.set('CONFIG_SCORING_WEIGHTS', JSON.stringify(conf.value), 'EX', 300);
+                }
+                return { ...DEFAULT_WEIGHTS, ...conf.value };
+            }
+        } catch (e) {
+            // Silent fail to defaults
+        }
+        return DEFAULT_WEIGHTS;
     }
 
     /**
-     * Main Pipeline: Clean -> Score -> Deduplicate (Fuzzy)
+     * Main Pipeline: Clean -> Score -> Complexity -> Deduplicate
      */
-    public processBatch(articles: INewsSourceArticle[]): INewsSourceArticle[] {
+    public async processBatch(articles: INewsSourceArticle[]): Promise<INewsSourceArticle[]> {
+        const weights = await this.getWeights();
+
         // 1. First pass: Scoring and Basic Cleaning
         const scored = articles.map(a => {
             // Normalize Image Field
             if (!a.image && a.urlToImage) a.image = a.urlToImage;
             
-            const score = this.calculateScore(a);
+            const score = this.calculateScore(a, weights);
             return { article: a, score };
         });
 
@@ -72,13 +97,16 @@ class ArticleProcessor {
         for (const item of scored) {
             const article = item.article;
 
-            // A. Quality Cutoff (The "Trap")
-            // Articles with score < 0 are rejected (mostly due to Junk Keywords)
-            if (item.score < 0) continue;
+            // A. Quality Cutoff (Dynamic)
+            if (item.score < weights.min_score_cutoff) continue;
 
             // B. Text Cleanup
-            article.title = this.formatHeadline(article.title);
-            article.description = this.cleanText(article.description || "");
+            article.title = formatHeadline(article.title);
+            article.description = cleanText(article.description || "");
+
+            // --- RESTORED: Calculate Cognitive Complexity ---
+            article.complexityScore = calculateReadingComplexity(article.description);
+            article.score = item.score; // Attach final score for debugging/logs
 
             // C. Validation
             if (!this.isValid(article)) continue;
@@ -99,7 +127,7 @@ class ArticleProcessor {
         return uniqueArticles.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
     }
 
-    private calculateScore(a: INewsSourceArticle): number {
+    private calculateScore(a: INewsSourceArticle, weights: typeof DEFAULT_WEIGHTS): number {
         let score = 0;
         const titleLower = (a.title || "").toLowerCase();
         const descLower = (a.description || "").toLowerCase();
@@ -109,24 +137,23 @@ class ArticleProcessor {
 
         // 1. Image Quality
         if (a.image && a.image.startsWith('http')) {
-            score += 2;
+            score += weights.image_bonus;
         } else {
             // Strict penalty for non-trusted sources without images
-            if (!isTrusted) score -= 10; 
-            else score -= 2; // Trusted sources get a pass
+            if (!isTrusted) score += weights.missing_image_untrusted_penalty; 
+            else score += weights.missing_image_penalty; 
         }
 
-        // 2. Title Length (Avoid tiny tickers)
-        if (a.title && a.title.length > 40) score += 1;
+        // 2. Title Length
+        if (a.title && a.title.length > 40) score += weights.title_length_bonus;
 
         // 3. Trusted Source Bonus
-        if (isTrusted) score += 5; 
+        if (isTrusted) score += weights.trusted_source_bonus; 
 
-        // 4. JUNK KEYWORDS (The "Trap")
-        // Immediate -20 penalty ensures these almost never pass the cutoff (0)
+        // 4. JUNK KEYWORDS
         const combinedText = titleLower + " " + descLower;
         if (JUNK_KEYWORDS.some(word => combinedText.includes(word.toLowerCase()))) {
-            score -= 20;
+            score += weights.junk_keyword_penalty;
         }
 
         return score;
@@ -135,15 +162,14 @@ class ArticleProcessor {
     private isValid(article: INewsSourceArticle): boolean {
         if (!article.title || !article.url) return false;
         
-        // Strict Validation (Matched to Old Repo)
+        // Strict Validation
         if (article.title.length < 20) return false; 
         if (article.title === "No Title") return false;
         if (!article.description || article.description.length < 30) return false; 
         
-        // Word Count Check (Garbage In -> Garbage Out Prevention)
-        // If article is too short, AI Summary will fail.
+        // Word Count Check
         const totalWords = (article.title + " " + article.description).split(/\s+/).length;
-        if (totalWords < 40) return false; // Restored to 40 words constraint
+        if (totalWords < 40) return false;
 
         return true;
     }
@@ -155,11 +181,8 @@ class ArticleProcessor {
             // Optimization: Don't compare if lengths are vastly different
             if (Math.abs(currentLen - existing.length) > 20) continue;
             
-            const score = this.getSimilarityScore(currentTitle, existing);
-            // Restored strict threshold
-            if (score > 0.8) { 
-                return true; 
-            }
+            const score = getSimilarityScore(currentTitle, existing);
+            if (score > 0.8) return true; 
         }
         return false;
     }
