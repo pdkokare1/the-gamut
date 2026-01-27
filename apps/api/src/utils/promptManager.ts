@@ -1,29 +1,13 @@
-// apps/api/src/utils/promptManager.ts
-
 import { prisma, PromptType } from '@gamut/db';
 import { redis } from './redis';
 import logger from './logger';
 
-// --- RICH DEFAULT PROMPTS ---
-
-const AI_PERSONALITY = {
-    // UPDATED: Explicit Min/Max instruction
-    LENGTH_INSTRUCTION: "Minimum 50 words and Maximum 60 words", 
-    TONE: "Objective, authoritative, and direct (News Wire Style)",
-    BIAS_STRICTNESS: "Strict. Flag subtle framing, omission, and emotional language.",
-    FORBIDDEN_WORDS: "delves, underscores, crucial, tapestry, landscape, moreover, notably, the article, the report, the author, discusses, highlights, according to"
+// --- DEFAULTS (Fallback if DB is empty) ---
+const DEFAULT_PERSONALITY = {
+    length_instruction: "Minimum 50 words and Maximum 60 words", 
+    tone: "Objective, authoritative, and direct (News Wire Style)",
+    forbidden_words: "delves, underscores, crucial, tapestry, landscape, moreover, notably, the article, the report, the author, discusses, highlights, according to"
 };
-
-const STYLE_RULES = `
-Style Guidelines:
-- **DIRECT REPORTING:** Act as the primary source. Do NOT say "The article states" or "The report highlights." Just state the facts.
-- **TITLE ACCURACY:** Use the EXACT titles found in the source text.
-- Tone: ${AI_PERSONALITY.TONE}.
-- **Length: ${AI_PERSONALITY.LENGTH_INSTRUCTION}.** If the source text is short, elaborate on the context to reach the minimum. If long, condense strictly to the maximum.
-- Structure: Use short, punchy sentences suitable for audio reading.
-- Grammar: Do NOT use hyphens (-), dashes (—), or colons (:) within sentences. Use periods or commas.
-- Vocabulary: Do NOT use these words: ${AI_PERSONALITY.FORBIDDEN_WORDS}.
-`;
 
 const DEFAULT_ANALYSIS_PROMPT = `
 Role: You are a Lead Editor for a global news wire.
@@ -38,8 +22,11 @@ Date: {{date}}
 --- INSTRUCTIONS ---
 
 1. **Summarize (News Wire Style)**:
-   ${STYLE_RULES}
-   - Report the "Who, What, When, Where, Why" immediately.
+   - **DIRECT REPORTING:** Act as the primary source. Do NOT say "The article states" or "The report highlights." Just state the facts.
+   - **TITLE ACCURACY:** Use the EXACT titles found in the source text.
+   - Tone: {{ai_tone}}
+   - **Length: {{ai_length}}**
+   - Vocabulary: Do NOT use these words: {{ai_forbidden}}
 
 2. **Categorize**:
    - Choose ONE: Politics, Business, Economy, Global Conflict, Tech, Science, Health, Justice, Sports, Entertainment, Lifestyle, Crypto & Finance, Gaming.
@@ -104,7 +91,7 @@ Description: "{{description}}"
 Snippet: "{{content}}"
 
 --- INSTRUCTIONS ---
-1. Summarize: Provide a factual summary with **Minimum 50 words and Maximum 60 words**.
+1. Summarize: Provide a factual summary with **{{ai_length}}**.
 2. Categorize: Choose the most relevant category.
 3. Sentiment: Determine if the story is Positive, Negative, or Neutral.
 
@@ -119,40 +106,51 @@ Respond ONLY in valid JSON:
 }
 `;
 
-// Helper type to handle the loose strings vs Enum
 type TemplateType = 'SUMMARY_ONLY' | keyof typeof PromptType;
 
 class PromptManager {
     
+    // --- 1. Get Personality Config (Crucial Feature Restored) ---
+    private async getPersonalityConfig() {
+        try {
+            // Check Redis Cache
+            const cached = await redis.get('CONFIG_AI_PERSONALITY');
+            if (cached) return JSON.parse(cached);
+
+            // Check Prisma DB
+            // Assuming 'SystemConfig' model exists in Prisma as { key: String, value: Json }
+            const config = await prisma.systemConfig.findUnique({ 
+                where: { key: 'ai_personality' } 
+            });
+
+            if (config && config.value) {
+                await redis.set('CONFIG_AI_PERSONALITY', JSON.stringify(config.value), 300); // Cache 5 mins
+                return config.value;
+            }
+        } catch (e) { /* Silent fail to defaults */ }
+        
+        return DEFAULT_PERSONALITY;
+    }
+
+    // --- 2. Get Template ---
     async getTemplate(type: TemplateType = 'ANALYSIS'): Promise<string> {
         const CACHE_KEY = `PROMPT_${type}`;
 
-        // 1. Check Redis
         try {
             const cached = await redis.get(CACHE_KEY);
             if (cached) return cached;
-        } catch (e) { /* Ignore Redis error */ }
+        } catch (e) { /* Ignore */ }
 
-        // 2. Handle non-DB hardcoded types
         if (type === 'SUMMARY_ONLY') return SUMMARY_ONLY_PROMPT;
 
-        // 3. Check Database (Prisma)
         try {
-            // Safe cast: We know at this point 'type' must be a valid Enum key
             const dbType = type as PromptType; 
-
             const doc = await prisma.prompt.findFirst({
-                where: { 
-                    type: dbType, 
-                    active: true 
-                },
-                orderBy: { 
-                    version: 'desc' 
-                }
+                where: { type: dbType, active: true },
+                orderBy: { version: 'desc' }
             });
 
             if (doc && doc.text) {
-                // Cache for 10 minutes
                 await redis.set(CACHE_KEY, doc.text, 600); 
                 return doc.text;
             }
@@ -160,27 +158,39 @@ class PromptManager {
             logger.warn(`⚠️ Prompt DB Fetch failed: ${e.message}`);
         }
 
-        // 4. Fallback
         return DEFAULT_ANALYSIS_PROMPT;
     }
 
-    private interpolate(template: string, data: Record<string, string>): string {
+    // --- 3. Interpolation Engine ---
+    private interpolate(template: string, data: Record<string, string | any>): string {
         return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-            return data[key] !== undefined ? data[key] : match;
+            return data[key] !== undefined ? String(data[key]) : match;
         });
     }
 
+    // --- 4. Main Entry Point ---
     public async getAnalysisPrompt(article: any, mode: 'Full' | 'Basic' = 'Full'): Promise<string> {
         const templateType: TemplateType = mode === 'Basic' ? 'SUMMARY_ONLY' : 'ANALYSIS';
-        const template = await this.getTemplate(templateType);
+        
+        // Parallel Fetch: Template + Personality to ensure speed
+        const [template, personality] = await Promise.all([
+            this.getTemplate(templateType),
+            this.getPersonalityConfig()
+        ]);
         
         const articleContent = article.summary || article.content || "";
         
+        // Combine Article Data with Dynamic Personality Data
         const data = {
             headline: article.title || "No Title",
             description: article.description || "No Description",
             content: articleContent, 
-            date: new Date().toISOString().split('T')[0]
+            date: new Date().toISOString().split('T')[0],
+
+            // Restored Dynamic Injection
+            ai_length: personality.length_instruction || DEFAULT_PERSONALITY.length_instruction,
+            ai_tone: personality.tone || DEFAULT_PERSONALITY.tone,
+            ai_forbidden: personality.forbidden_words || DEFAULT_PERSONALITY.forbidden_words
         };
 
         return this.interpolate(template, data);
