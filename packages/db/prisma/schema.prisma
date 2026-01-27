@@ -1,3 +1,5 @@
+// packages/db/prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -35,6 +37,7 @@ model Article {
   biasScore            Float           @default(0)
   biasLabel            String?
   biasComponents       BiasComponents?
+
   credibilityScore     Float                  @default(0)
   credibilityGrade     String?
   credibilityComponents CredibilityComponents?
@@ -46,6 +49,12 @@ model Article {
   trustScore           Float    @default(0)
   trustLevel           String?
   
+  // -- Complexity & Bias Detection (New Fields) --
+  // Cognitive Load: 0 = Simple/Viral, 100 = Complex/Academic
+  complexityScore      Float    @default(50) 
+  // Vector-compatible bias: -1 (Left) to 1 (Right)
+  detectedBias         Float    @default(0)
+
   // -- Coverage Stats --
   coverageLeft   Float @default(0)
   coverageCenter Float @default(0)
@@ -58,8 +67,14 @@ model Article {
   primaryNoun    String?
   secondaryNoun  String?
   
+  // Interest Profiling
+  topics         String[]
+
   // Feed Optimization (Hides older versions of same story)
   isLatest       Boolean @default(true)
+
+  // -- Trash / Archive Support --
+  deletedAt      DateTime? 
   
   // -- Vector Data --
   embedding      Float[]
@@ -71,18 +86,13 @@ model Article {
   updatedAt       DateTime @updatedAt
 
   // -- Relations --
-  // FIX: Prisma does not allow defining the relation on both sides for MongoDB lists.
-  // We keep the data field `savedByProfileIds` so no data is lost, but we remove
-  // the @relation attribute here to prevent "Ambiguous Relation" errors.
-  // The relation is actively managed on the Profile model.
+  // The relation is actively managed on the Profile model via savedArticleIds
   savedByProfileIds String[]      @db.ObjectId
-  // savedByProfiles   Profile[]     @relation(fields: [savedByProfileIds], references: [id]) 
 
   activityLogs      ActivityLog[]
 
   // -- Indexes --
-  // NOTE: MongoDB Atlas Search indexes (for smartSearch) and TTL indexes (expireAfterSeconds)
-  // must be managed directly in MongoDB/Atlas.
+  // Note: MongoDB Atlas Search indexes must be managed in Atlas.
   
   // 1. Standard Field Indexes
   @@index([source])
@@ -92,6 +102,8 @@ model Article {
   @@index([category])
   @@index([politicalLean])
   @@index([isLatest])
+  @@index([detectedBias])
+  @@index([deletedAt])
   @@index([publishedAt(sort: Desc)]) 
 
   // 2. Compound Indexes
@@ -138,6 +150,7 @@ model Profile {
   email                 String?  @unique
   phoneNumber           String?  @unique
   username              String   @unique
+  role                  Role     @default(user)
   
   // -- Stats --
   articlesViewedCount    Int      @default(0)
@@ -147,6 +160,10 @@ model Profile {
   // -- Gamification --
   currentStreak         Int      @default(0)
   lastActiveDate        DateTime @default(now())
+  streakFreezes         Int      @default(1)
+  
+  habits                Habit[]
+  quests                Quest[]
   badges                Badge[]
   
   // -- Saved Content --
@@ -157,9 +174,10 @@ model Profile {
   // -- Personalization --
   userEmbedding         Float[]
   
-  // -- Notifications --
+  // -- Settings & Privacy --
+  notificationsEnabled  Boolean  @default(true)
   fcmToken              String?
-  notificationsEnabled  Boolean  @default(false)
+  isIncognito           Boolean  @default(false)
   
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -167,6 +185,7 @@ model Profile {
   // Relations
   activityLogs          ActivityLog[]
   userStats             UserStats?
+
   @@map("profiles")
 }
 
@@ -174,12 +193,51 @@ model UserStats {
   id                    String   @id @default(auto()) @map("_id") @db.ObjectId
   userId                String   @unique
   
+  // -- Core Metrics --
   totalTimeSpent        Int      @default(0) 
-  averageAttentionSpan  Int      @default(0) 
+  articlesReadCount     Int      @default(0)
   
+  averageAttentionSpan  Int      @default(0) 
+  focusScoreAvg         Float    @default(100) // 0-100
+  deepFocusMinutes      Float    @default(0)
+
+  // -- Perspective & Echo Chamber --
+  diversityScore        Float    @default(50) // 0-100
+  lastLeanSequence      String[] // ["Left", "Right", "Center"]
+  lastSentimentSequence String[] // ["Negative", "Positive"]
+  suggestPalateCleanser Boolean  @default(false)
+
+  // -- Contextual Exposure --
   leanExposure          LeanExposure?
-  // Flexible Map for dynamic topic interests
-  topicInterest         Json?
+  leanExposureMorning   LeanExposure?
+  leanExposureEvening   LeanExposure?
+
+  // -- Interests & Reading Style --
+  readingStyle          ReadingStyle @default(balanced)
+  
+  // Flexible Maps (Stored as JSON)
+  topicInterest         Json? // Map<string, number>
+  topicImpressions      Json? // Map<string, number>
+  negativeInterest      Json? // Map<string, number> - Ignored topics
+  readingProgress       Json? // Map<string, number> - Scroll depth
+
+  lastTimezone          String   @default("UTC")
+
+  // -- Habit & Streak Tracking --
+  currentStreak         Int      @default(0)
+  longestStreak         Int      @default(0)
+  lastActiveDate        DateTime @default(now())
+  streakFreezes         Int      @default(1)
+  lastFreezeUsed        DateTime?
+
+  // -- Histories & Status --
+  dailyHabitStatus      DailyHabitStatus[]
+  recentDailyHistory    DailyHistoryEntry[]
+  dailyStats            DailyStats?
+
+  activityByHour        Json?    // Map<string, number>
+  peakLearningTime      Int?     // 0-23
+  
   engagementScore       Float    @default(50)
   lastUpdated           DateTime @default(now())
 
@@ -194,8 +252,6 @@ model ActivityLog {
   user      Profile  @relation(fields: [userId], references: [userId])
   userId    String   
   
-  // FIX: Made article optional because actions like 'view_comparison' 
-  // do not have an associated articleId.
   article   Article? @relation(fields: [articleId], references: [id])
   articleId String?  @db.ObjectId
   
@@ -204,8 +260,26 @@ model ActivityLog {
 
   @@index([userId, timestamp(sort: Desc)])
   @@index([userId, action, timestamp(sort: Desc)])
+  @@index([userId, articleId]) // Rapid lookup for "Has user read X?"
   
   @@map("activitylogs")
+}
+
+model SearchLog {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  query           String
+  normalizedQuery String   @unique
+  count           Int      @default(1)
+  lastSearched    DateTime @default(now())
+  zeroResults     Boolean  @default(false)
+  resultCountAvg  Float    @default(0)
+  
+  createdAt       DateTime @default(now())
+
+  @@index([count(sort: Desc)])
+  @@index([lastSearched(sort: Desc)])
+  
+  @@map("searchlogs")
 }
 
 // ==========================================
@@ -229,7 +303,9 @@ model Prompt {
 model SystemConfig {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
-  value       String[] 
+  // Changed to Json to support Mixed types (Objects, Arrays, Primitives)
+  value       Json 
+  description String?
   lastUpdated DateTime @default(now())
 
   @@map("systemconfigs")
@@ -255,7 +331,6 @@ model EmergencyContact {
 model Cache {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique
-  
   data        Json
   expiresAt   DateTime 
   createdAt   DateTime @default(now())
@@ -267,6 +342,7 @@ model Cache {
 // 4. TYPES & ENUMS
 // ==========================================
 
+// --- Bias & Analysis Types ---
 type BiasComponents {
   linguistic      LinguisticBias
   sourceSelection SourceSelectionBias
@@ -317,20 +393,6 @@ type ReliabilityComponents {
   updateMaintenance    Float
 }
 
-type Badge {
-  id          String
-  label       String
-  icon        String
-  description String
-  earnedAt    DateTime @default(now())
-}
-
-type LeanExposure {
-  Left   Float @default(0)
-  Center Float @default(0)
-  Right  Float @default(0)
-}
-
 type DivergencePoint {
   point       String
   perspectives Perspective[]
@@ -339,6 +401,71 @@ type DivergencePoint {
 type Perspective {
   source String
   stance String
+}
+
+// --- Gamification & Stats Types ---
+
+type Badge {
+  id          String
+  label       String
+  icon        String
+  description String
+  earnedAt    DateTime @default(now())
+}
+
+type Habit {
+  type      HabitType
+  target    Int
+  label     String
+  frequency Frequency @default(daily)
+}
+
+type Quest {
+  id          String
+  type        QuestType
+  target      Int
+  progress    Int       @default(0)
+  isCompleted Boolean   @default(false)
+  reward      String
+  description String
+  expiresAt   DateTime
+  frequency   Frequency @default(daily)
+}
+
+type DailyHabitStatus {
+  habitId   String?
+  type      HabitType
+  current   Int
+  target    Int
+  completed Boolean
+  label     String?
+}
+
+type DailyHistoryEntry {
+  date         String // YYYY-MM-DD
+  timeSpent    Int
+  articlesRead Int
+  goalsMet     Boolean
+}
+
+type DailyStats {
+  date         DateTime @default(now())
+  timeSpent    Int      @default(0)
+  articlesRead Int      @default(0)
+  goalsMet     Boolean  @default(false)
+}
+
+type LeanExposure {
+  Left   Float @default(0)
+  Center Float @default(0)
+  Right  Float @default(0)
+}
+
+// --- Enums ---
+
+enum Role {
+  user
+  admin
 }
 
 enum PromptType {
@@ -363,4 +490,30 @@ enum ActionType {
   view_comparison
   share_article
   read_external
+}
+
+enum ReadingStyle {
+  skimmer
+  deep_reader
+  balanced
+  learner
+}
+
+enum Frequency {
+  daily
+  weekly
+}
+
+enum HabitType {
+  daily_minutes
+  daily_articles
+  daily_audio
+  weekly_articles
+}
+
+enum QuestType {
+  read_opposing
+  read_deep
+  share_article
+  topic_explorer
 }
